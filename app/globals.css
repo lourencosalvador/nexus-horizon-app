@@ -1,0 +1,60 @@
+@import "tailwindcss";
+@import "react-international-phone/style.css";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-rubik);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-rubik), sans-serif;
+}
+
+.react-international-phone-country-selector-dropdown__list-item {
+  align-items: center;
+}
+.react-international-phone-flag-emoji,
+.react-international-phone-country-selector-button__flag-emoji,
+.react-international-phone-country-selector-dropdown__list-item-flag-emoji {
+  font-size: 18px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@layer components {
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #27272a;
+    border-radius: 10px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #3f3f46;
+  }
+}
+
+.gradient-left {
+  background: linear-gradient(
+    to right,
+    #ffffff 0%,
+    #f2f2f2 15%,
+    #d9d9d9 35%,
+    #a6a6a6 55%,
+    #595959 75%,
+    #000000 100%
+  );
+}

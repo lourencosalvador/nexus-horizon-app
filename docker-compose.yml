@@ -1,0 +1,36 @@
+services:
+  selenium:
+    image: selenium/standalone-chrome:latest
+    shm_size: 2gb
+    ports:
+      - "4444:4444"
+    environment:
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_NODE_OVERRIDE_MAX_SESSIONS=true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4444/wd/hub/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    env_file:
+      - .env
+      - .env.local
+    environment:
+      - NODE_ENV=development
+      - USE_SELENIUM_GRID=true
+      - SELENIUM_HUB_URL=http://selenium:4444/wd/hub
+    depends_on:
+      selenium:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+
+
