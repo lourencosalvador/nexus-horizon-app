@@ -68,6 +68,9 @@ async function internalRequest(session: SkoolConnectorSession, path: string, opt
         : null;
     throw new Error(data.error || hint || "Skool request failed.");
   }
+  if (typeof data.status === "number" && data.status >= 400) {
+    throw new Error(`Skool upstream error (${data.status}) for ${path}`);
+  }
   return data;
 }
 
@@ -122,6 +125,39 @@ export function skoolDisplayName(channel: SkoolChatChannel): string {
   const last = (u?.last_name ?? "").trim();
   const full = `${first} ${last}`.trim();
   return full || (u?.name ?? "Unknown");
+}
+
+export type SkoolUser = {
+  id: string;
+  name?: string;
+  first_name?: string;
+  last_name?: string;
+  metadata?: { picture_profile?: string; picture_bubble?: string };
+};
+
+function coerceUser(json: unknown): SkoolUser | null {
+  if (!json || typeof json !== "object") return null;
+  // common shapes: { ...userFields } OR { user: {...} }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyJson = json as any;
+  const u = anyJson.user && typeof anyJson.user === "object" ? anyJson.user : anyJson;
+  if (!u || typeof u !== "object") return null;
+  if (!u.id) return null;
+  return u as SkoolUser;
+}
+
+export async function skoolGetUser(session: SkoolConnectorSession, userId: string): Promise<SkoolUser | null> {
+  const candidates = [`/users/${userId}`, `/members/${userId}`, `/user/${userId}`];
+  for (const path of candidates) {
+    try {
+      const r = await internalRequest(session, path, { method: "GET" });
+      const u = coerceUser(r.json);
+      if (u) return u;
+    } catch {
+      // try next
+    }
+  }
+  return null;
 }
 
 

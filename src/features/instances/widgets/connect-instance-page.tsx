@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowUpRight, ChevronRight, ExternalLink } from "lucide-react";
+import { ArrowUpRight, ChevronRight, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/shared/ui/badge";
@@ -45,6 +45,7 @@ export default function ConnectInstancePage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [communityUrl, setCommunityUrl] = useState("");
   const [cookie, setCookie] = useState("");
   const [useAdvancedCookie, setUseAdvancedCookie] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -75,6 +76,7 @@ export default function ConnectInstancePage() {
 
     let looksLoggedIn: boolean | null = null;
     let encryptedCookie: string | null = null;
+    let detectedGroup: { id: string; name: string; displayName?: string } | null = null;
     try {
       if (useAdvancedCookie) {
         const c = cookie.trim();
@@ -84,10 +86,24 @@ export default function ConnectInstancePage() {
           setIsVerifying(false);
           return;
         }
-        const res = await fetch("/api/integrations/skool/verify", {
+        // Encrypt cookie server-side so the rest of the app can call Skool internal endpoints.
+        const encRes = await fetch("/api/integrations/skool/session/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ baseUrl: b, cookie: c }),
+        });
+        const encData = (await encRes.json()) as { ok?: boolean; encryptedCookie?: string; error?: string };
+        if (!encRes.ok || encData.ok === false || !encData.encryptedCookie) {
+          toast.error(encData.error || "Could not encrypt cookie.");
+          setIsVerifying(false);
+          return;
+        }
+        encryptedCookie = encData.encryptedCookie;
+
+        const res = await fetch("/api/integrations/skool/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ baseUrl: b, encryptedCookie }),
         });
         const data = (await res.json()) as { ok?: boolean; looksLoggedIn?: boolean | null; error?: string };
         if (!res.ok || data.ok === false) {
@@ -96,7 +112,6 @@ export default function ConnectInstancePage() {
           return;
         }
         looksLoggedIn = typeof data.looksLoggedIn === "boolean" ? data.looksLoggedIn : null;
-        // We keep raw cookie only for advanced/dev mode.
       } else {
         const e = email.trim();
         const p = password;
@@ -105,18 +120,40 @@ export default function ConnectInstancePage() {
           setIsVerifying(false);
           return;
         }
-        const res = await fetch("/api/integrations/skool/session/create", {
+        const connectorRes = await fetch("/api/integrations/skool/session/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ baseUrl: b, email: e, password: p }),
         });
-        const data = (await res.json()) as { ok?: boolean; encryptedCookie?: string; connector?: string; error?: string };
-        if (!res.ok || data.ok === false || !data.encryptedCookie) {
-          toast.error(`${data.error || "Could not create session."}${data.connector ? ` (connector: ${data.connector})` : ""}`);
+
+        const connectorData = (await connectorRes.json()) as { ok?: boolean; encryptedCookie?: string; connector?: string; error?: string };
+        if (!connectorRes.ok || connectorData.ok === false || !connectorData.encryptedCookie) {
+          toast.error(
+            `${connectorData.error || "Could not create Skool connector session."}${
+              connectorData.connector ? ` (connector: ${connectorData.connector})` : ""
+            }`
+          );
           setIsVerifying(false);
           return;
         }
-        encryptedCookie = data.encryptedCookie;
+        encryptedCookie = connectorData.encryptedCookie;
+
+        // Discover groups (best-effort) so we can auto-fill group_id and instance name.
+        try {
+          const gRes = await fetch("/api/integrations/skool/groups/list", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ encryptedCookie }),
+          });
+          const gData = (await gRes.json()) as { ok?: boolean; groups?: Array<{ id: string; name: string; displayName?: string }> };
+          const groups = Array.isArray(gData.groups) ? gData.groups : [];
+          if (gRes.ok && gData.ok !== false && groups.length > 0) {
+            detectedGroup = groups[0] ?? null;
+          }
+        } catch {
+          // ignore
+        }
+
         // Optional: best-effort verify using encrypted cookie to detect obvious failures.
         const v = await fetch("/api/integrations/skool/verify", {
           method: "POST",
@@ -133,9 +170,11 @@ export default function ConnectInstancePage() {
     }
 
     const now = Date.now();
-    // We’ll discover the actual community/group later via the connector.
-    const url = "skool.com";
-    const communityName = "Skool Community";
+    const provided = communityUrl.trim().replace(/\/+$/g, "");
+    const providedSlug = provided.includes("skool.com/") ? provided.split("skool.com/").pop()?.split("?")[0]?.trim() ?? "" : "";
+    const groupSlug = (providedSlug || detectedGroup?.name || "").trim();
+    const url = groupSlug ? `https://www.skool.com/${groupSlug}` : "https://www.skool.com";
+    const communityName = detectedGroup?.displayName ?? groupSlug ?? "Skool Community";
     const next: WorkspaceInstance = {
       id: `inst_${now}`,
       name: communityName,
@@ -285,10 +324,10 @@ export default function ConnectInstancePage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 {!useAdvancedCookie ? (
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div>
-                      <div className="text-sm font-semibold text-zinc-900">Skool Email</div>
-                      <div className="mt-2">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <div className="text-sm font-semibold text-zinc-900">Skool Email</div>
+                    <div className="mt-2">
                         <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@myaccount.com" />
                       </div>
                     </div>
@@ -296,6 +335,19 @@ export default function ConnectInstancePage() {
                       <div className="text-sm font-semibold text-zinc-900">Skool Password</div>
                       <div className="mt-2">
                         <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="My Password" type="password" />
+                      </div>
+                    </div>
+                    <div className="sm:col-span-2">
+                      <div className="text-sm font-semibold text-zinc-900">Community URL (optional)</div>
+                      <div className="mt-2">
+                        <Input
+                          value={communityUrl}
+                          onChange={(e) => setCommunityUrl(e.target.value)}
+                          placeholder="https://www.skool.com/your-community-slug"
+                        />
+                      </div>
+                      <div className="mt-1 text-xs text-zinc-500">
+                        If we can't auto-detect your community, we'll use this URL to sync posts.
                       </div>
                     </div>
                   </div>
@@ -327,8 +379,17 @@ export default function ConnectInstancePage() {
                 </button>
 
                 <Button className="cursor-pointer w-full" onClick={() => void onVerify()} disabled={isVerifying}>
-                  {isVerifying ? "Verifying…" : "Verify account & connect"}
+                  {isVerifying ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Connecting…
+                    </>
+                  ) : (
+                    <>
+                      Verify account & connect
                   <ArrowUpRight size={16} />
+                    </>
+                  )}
                 </Button>
               </CardContent>
             </Card>

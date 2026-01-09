@@ -21,13 +21,14 @@ export function Avatar({
   size = "md",
   className,
 }: {
-  name: string;
+  name?: string | null;
   src?: string;
   online?: boolean;
   showOnline?: boolean;
   size?: "sm" | "md" | "lg";
   className?: string;
 }) {
+  const safeName = (name ?? "").trim() || "Member";
   const [failed, setFailed] = useState(false);
   const showImage = Boolean(src) && !failed;
 
@@ -50,7 +51,7 @@ export function Avatar({
         {showImage ? (
           <Image
             src={src as string}
-            alt={name}
+            alt={safeName}
             fill
             sizes={sizesAttr}
             className="object-cover z-0"
@@ -58,7 +59,7 @@ export function Avatar({
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-xs font-extrabold text-zinc-900">
-            {initials(name)}
+            {initials(safeName)}
           </div>
         )}
       </div>

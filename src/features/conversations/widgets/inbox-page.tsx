@@ -48,9 +48,11 @@ import { Textarea } from "@/shared/ui/textarea";
 import { getActiveInstanceId } from "@/shared/stores/instanceStore";
 import { getSkoolSession } from "@/shared/stores/skoolSessionStore";
 import { getStoredUser } from "@/shared/stores/userStore";
+import { setInboxUnread } from "@/shared/stores/inboxUnreadStore";
 import {
   skoolGetMessages,
   skoolDisplayName,
+  skoolGetUser,
   skoolInferMyUserId,
   skoolListChannels,
   skoolMarkRead,
@@ -460,6 +462,7 @@ export default function InboxPage() {
   const [pinnedOpen, setPinnedOpen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [isSending, setIsSending] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingStreamRef = useRef<MediaStream | null>(null);
   const recordingChunksRef = useRef<BlobPart[]>([]);
@@ -468,6 +471,7 @@ export default function InboxPage() {
   const skoolChannelsQuery = useQuery({
     queryKey: ["skool", "chat-channels", activeInstanceId, skoolConnector?.encryptedCookie],
     enabled: Boolean(skoolConnector),
+    refetchInterval: isSkoolMode ? 15_000 : false,
     queryFn: async () => {
       if (!skoolConnector) return [];
       return await skoolListChannels(skoolConnector);
@@ -482,33 +486,50 @@ export default function InboxPage() {
   }, [skoolChannelsQuery.data, state.selectedId]);
 
   const skoolMessagesQuery = useQuery({
-    queryKey: [
-      "skool",
-      "chat-messages",
-      activeInstanceId,
-      skoolConnector?.encryptedCookie,
-      selectedSkoolChannel?.id,
-      selectedSkoolChannel?.last_message_id,
-      selectedSkoolChannel?.metadata?.last_read,
-    ],
+    queryKey: ["skool", "chat-messages", activeInstanceId, skoolConnector?.encryptedCookie, selectedSkoolChannel?.id],
     enabled: Boolean(
       skoolConnector &&
         selectedSkoolChannel?.id &&
         (selectedSkoolChannel?.last_message_id || selectedSkoolChannel?.metadata?.last_read)
     ),
+    refetchInterval: isSkoolMode && selectedSkoolChannel?.id ? 15_000 : false,
     queryFn: async () => {
       if (!skoolConnector || !selectedSkoolChannel) return { messages: [] as any[] };
       const anchor = selectedSkoolChannel.last_message_id || selectedSkoolChannel.metadata?.last_read;
       if (!anchor) return { messages: [] as any[] };
-      return await skoolGetMessages(skoolConnector, selectedSkoolChannel.id, anchor, { before: 50, after: 0 });
+      return await skoolGetMessages(skoolConnector, selectedSkoolChannel.id, anchor, { before: 50, after: 50 });
     },
   });
 
-  const skoolLoadingList = isSkoolMode && (skoolChannelsQuery.isLoading || skoolChannelsQuery.isFetching);
-  const skoolLoadingMessages = isSkoolMode && (skoolMessagesQuery.isLoading || skoolMessagesQuery.isFetching);
+  const skoolLoadingList = isSkoolMode && skoolChannelsQuery.isLoading;
+  const skoolLoadingMessages = isSkoolMode && skoolMessagesQuery.isLoading;
   const operator = useMemo(() => getStoredUser(), []);
-  const operatorName = operator?.name || displayName(user) || "Nexus";
-  const operatorAvatarUrl = operator?.pictureUrl || operator?.photoDataUrl || "";
+  const skoolMeQuery = useQuery({
+    queryKey: ["skool", "me", activeInstanceId, skoolConnector?.encryptedCookie, selectedSkoolChannel?.id],
+    enabled: Boolean(skoolConnector && selectedSkoolChannel?.id),
+    queryFn: async () => {
+      if (!skoolConnector || !selectedSkoolChannel) return null;
+      const myId = skoolInferMyUserId(selectedSkoolChannel);
+      if (!myId) return null;
+      return await skoolGetUser(skoolConnector, myId);
+    },
+    staleTime: 5 * 60_000,
+  });
+
+  const operatorName =
+    (skoolMeQuery.data
+      ? `${(skoolMeQuery.data.first_name ?? "").trim()} ${(skoolMeQuery.data.last_name ?? "").trim()}`.trim() ||
+        skoolMeQuery.data.name
+      : null) ||
+    operator?.name ||
+    displayName(user) ||
+    "Nexus";
+
+  const operatorAvatarUrl =
+    skoolMeQuery.data?.metadata?.picture_profile ||
+    operator?.pictureUrl ||
+    operator?.photoDataUrl ||
+    "";
 
   useEffect(() => {
     fetch("/api/auth/me")
@@ -589,6 +610,12 @@ export default function InboxPage() {
   useEffect(() => {
     localStorage.setItem(PINS_KEY, JSON.stringify(pinnedByConversation));
   }, [pinnedByConversation]);
+
+  useEffect(() => {
+    // Global unread dot (sidebar): keep it in sync for both demo + Skool modes.
+    const total = state.conversations.reduce((acc, c) => acc + (c.unread > 0 ? c.unread : 0), 0);
+    setInboxUnread(total);
+  }, [state.conversations]);
 
   useEffect(() => {
     if (!isSkoolMode) return;
@@ -915,6 +942,7 @@ export default function InboxPage() {
 
   const sendMessage = () => {
     if (!selected) return;
+    if (isSending) return;
     const text = composer.trim();
     const attachment = pendingAttachment;
     if (!text && !attachment) return;
@@ -928,16 +956,58 @@ export default function InboxPage() {
         return;
       }
       const channelId = selected.id;
+      const optimisticId = `skool_local_${Date.now()}`;
+      const now = Date.now();
+      const optimistic: Message = {
+        id: optimisticId,
+        conversationId: channelId,
+        role: "nexus",
+        text,
+        at: now,
+        delivery: "sent",
+      };
+
       setComposer("");
       setPendingAttachment(null);
       setReplyToId(null);
+      setIsSending(true);
+
+      // Optimistic UI: append immediately (no loading flicker).
+      setMessagesMap((prev) => {
+        const thread = prev[channelId] ?? [];
+        return { ...prev, [channelId]: [...thread, optimistic] };
+      });
+      setState((prev) => {
+        const conversations = prev.conversations.map((c) =>
+          c.id === channelId ? { ...c, lastMessage: text, lastAt: now, unread: 0 } : c
+        );
+        return { ...prev, conversations };
+      });
+
       void (async () => {
         try {
-          await skoolSendMessage(skoolConnector, channelId, text);
-          await Promise.all([skoolChannelsQuery.refetch(), skoolMessagesQuery.refetch()]);
+          const created = await skoolSendMessage(skoolConnector, channelId, text);
+          // Replace temp id with the real id (best-effort).
+          setMessagesMap((prev) => {
+            const thread = prev[channelId] ?? [];
+            const next = thread.map((m) =>
+              m.id === optimisticId ? { ...m, id: created.id, delivery: "delivered" as Delivery } : m
+            );
+            return { ...prev, [channelId]: next };
+          });
+          // Silent refresh (UI keeps previous data; no skeleton on fetching).
+          void skoolChannelsQuery.refetch();
+          void skoolMessagesQuery.refetch();
         } catch (e) {
           toast.error(e instanceof Error ? e.message : "Failed to send message.");
+          // Rollback optimistic message.
+          setMessagesMap((prev) => {
+            const thread = prev[channelId] ?? [];
+            return { ...prev, [channelId]: thread.filter((m) => m.id !== optimisticId) };
+          });
           setComposer(text);
+        } finally {
+          setIsSending(false);
         }
       })();
       return;
@@ -2702,10 +2772,17 @@ export default function InboxPage() {
                       <Button
                         className="cursor-pointer rounded-xl px-5"
                         onClick={sendMessage}
-                        disabled={isRecording || (!composer.trim() && !pendingAttachment)}
+                        disabled={isSending || isRecording || (!composer.trim() && !pendingAttachment)}
                         aria-label="Send"
                       >
-                        Send
+                        {isSending ? (
+                          <>
+                            Sending
+                            <span className="ml-2 inline-flex h-4 w-4 animate-spin rounded-full border-2 border-white/50 border-t-white" />
+                          </>
+                        ) : (
+                          "Send"
+                        )}
                         <Send size={16} />
                       </Button>
                     </div>

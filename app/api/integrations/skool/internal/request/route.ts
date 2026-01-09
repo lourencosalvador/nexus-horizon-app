@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
     const waf = getCookieValue(cookie, "aws-waf-token");
     const headers: Record<string, string> = {
       cookie,
-      ...(waf ? { "x-aws-waf-token": waf } : null),
+      ...(waf ? { "x-aws-waf-token": waf } : {}),
       origin: "https://www.skool.com",
       referer: "https://www.skool.com/",
       accept: "application/json, text/plain;q=0.9, */*;q=0.8",

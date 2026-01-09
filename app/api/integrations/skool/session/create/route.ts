@@ -2,11 +2,13 @@ import { NextResponse, type NextRequest } from "next/server";
 import { chromium } from "playwright";
 import { encryptString } from "../../_crypto";
 import { Builder, By, until, type WebDriver } from "selenium-webdriver";
+import chrome from "selenium-webdriver/chrome";
 
 type CreateSessionBody = {
   baseUrl?: string;
-  email: string;
-  password: string;
+  email?: string;
+  password?: string;
+  cookie?: string;
 };
 
 function normalizeBaseUrl(input: string | undefined) {
@@ -38,7 +40,14 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
   const hub = process.env.SELENIUM_HUB_URL || "http://selenium:4444/wd/hub";
   let driver: WebDriver | null = null;
   try {
-    driver = await new Builder().forBrowser("chrome").usingServer(hub).build();
+    const options = new chrome.Options()
+      .addArguments("--no-sandbox")
+      .addArguments("--disable-dev-shm-usage")
+      .addArguments("--disable-gpu")
+      .addArguments("--window-size=1280,720")
+      .addArguments("--headless=new");
+
+    driver = await new Builder().forBrowser("chrome").setChromeOptions(options).usingServer(hub).build();
     await driver.get(baseUrl);
 
     // Navigate to a likely login page if needed.
@@ -93,8 +102,8 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
     const apiCookies = await driver.manage().getCookies();
 
     const merged = mergeCookies(
-      webCookies.map((c) => ({ name: c.name, value: c.value })),
-      apiCookies.map((c) => ({ name: c.name, value: c.value }))
+      webCookies.map((c: any) => ({ name: c.name, value: c.value })),
+      apiCookies.map((c: any) => ({ name: c.name, value: c.value }))
     );
     const cookieHeader = buildCookieHeader(merged);
     return { cookieHeader };
@@ -113,13 +122,40 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "Invalid JSON." }, { status: 400 });
   }
 
+  const baseUrl = normalizeBaseUrl(body.baseUrl);
+
+  const rawCookie = (body.cookie ?? "").trim();
+  if (rawCookie) {
+    if (rawCookie.length < 20) {
+      return NextResponse.json({ ok: false, connector: "cookie", error: "Cookie header is too short." }, { status: 400 });
+    }
+    if (!hasCookie(rawCookie, "auth_token")) {
+      return NextResponse.json(
+        {
+          ok: false,
+          connector: "cookie",
+          error:
+            "Cookie header is missing auth_token. Make sure you're logged in on Skool, then copy the Cookie request header from DevTools.",
+        },
+        { status: 401 }
+      );
+    }
+    const encryptedCookie = encryptString(rawCookie);
+    return NextResponse.json({
+      ok: true,
+      baseUrl,
+      connector: "cookie",
+      encryptedCookie,
+      createdAt: Date.now(),
+      note: "Cookie was encrypted server-side. No password was used or stored.",
+    });
+  }
+
   const email = (body.email ?? "").trim();
   const password = String(body.password ?? "");
   if (!email.includes("@") || password.length < 3) {
     return NextResponse.json({ ok: false, error: "Invalid email or password." }, { status: 400 });
   }
-
-  const baseUrl = normalizeBaseUrl(body.baseUrl);
 
   // IMPORTANT: We do not store the password. We only use it to establish a session and extract cookies.
   // This is a best-effort headless flow and may break if Skool changes their login UI.

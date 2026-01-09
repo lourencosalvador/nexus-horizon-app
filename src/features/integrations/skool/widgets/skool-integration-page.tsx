@@ -60,6 +60,21 @@ type SkoolChatMessagesResponse = {
   channel?: SkoolChatChannel;
 };
 
+type ModerationApiResponse =
+  | {
+      ok: true;
+      result: {
+        decision: "approved" | "needs_review" | "blocked";
+        confidence: number;
+        reasons: string[];
+        signals: string[];
+        layer: "heuristics_only" | "heuristics_plus_ai";
+        isJobsContext: boolean;
+        model?: string;
+      };
+    }
+  | { ok: false; error: string; issues?: unknown };
+
 export default function SkoolIntegrationPage() {
   const activeId = getActiveInstanceId();
   const active = getActiveInstance();
@@ -96,6 +111,16 @@ export default function SkoolIntegrationPage() {
   const [readState, setReadState] = useState<{ status: "idle" | "loading" | "ok" | "error"; message?: string }>({
     status: "idle",
   });
+
+  const [modTitle, setModTitle] = useState("");
+  const [modCategoryName, setModCategoryName] = useState("");
+  const [modCategoryId, setModCategoryId] = useState("");
+  const [modContent, setModContent] = useState("");
+  const [modState, setModState] = useState<{
+    status: "idle" | "loading" | "ok" | "error";
+    message?: string;
+    data?: ModerationApiResponse;
+  }>({ status: "idle" });
 
   const hasEncrypted = Boolean(session?.encryptedCookie);
   const hasLegacyCookie = Boolean(session?.cookie);
@@ -286,6 +311,48 @@ export default function SkoolIntegrationPage() {
     }
   };
 
+  const analyzeModeration = async () => {
+    const content = modContent.trim();
+    if (!content) {
+      setModState({ status: "error", message: "Content is required." });
+      return;
+    }
+    setModState({ status: "loading", message: "Analyzing…" });
+    try {
+      const postId = `demo_${Date.now()}`;
+      const res = await fetch("/api/moderation/analyze/post", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          post: {
+            id: postId,
+            title: modTitle.trim() || undefined,
+            content,
+            category_name: modCategoryName.trim() || undefined,
+            category_id: modCategoryId.trim() || undefined,
+          },
+        }),
+      });
+      const data = (await res.json()) as ModerationApiResponse;
+      if (!res.ok || (data as any).ok === false) {
+        setModState({ status: "error", message: (data as any).error || "Analyze failed.", data });
+        return;
+      }
+      try {
+        const key = "nexus_moderation_cache_v1";
+        const raw = window.localStorage.getItem(key);
+        const existing = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+        const next = { ...existing, [postId]: (data as any).result };
+        window.localStorage.setItem(key, JSON.stringify(next));
+      } catch {
+        // best-effort cache
+      }
+      setModState({ status: "ok", message: "OK", data });
+    } catch (e) {
+      setModState({ status: "error", message: e instanceof Error ? e.message : "Network error." });
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -460,6 +527,106 @@ export default function SkoolIntegrationPage() {
             <Separator className="my-2" />
 
             <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-zinc-900">Post moderation test</div>
+                  <div className="mt-1 text-xs font-semibold text-zinc-500">
+                    Runs the post pipeline (heuristics → optional AI) and returns approved / needs_review / blocked.
+                  </div>
+                </div>
+                <Badge variant="default">TEST</Badge>
+              </div>
+
+              <div className="mt-3 grid gap-3">
+                <Input value={modTitle} onChange={(e) => setModTitle(e.target.value)} placeholder="Title (optional)" />
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Input
+                    value={modCategoryName}
+                    onChange={(e) => setModCategoryName(e.target.value)}
+                    placeholder='Category name (optional, e.g. "Jobs")'
+                  />
+                  <Input
+                    value={modCategoryId}
+                    onChange={(e) => setModCategoryId(e.target.value)}
+                    placeholder="Category id (optional)"
+                  />
+                </div>
+                <textarea
+                  value={modContent}
+                  onChange={(e) => setModContent(e.target.value)}
+                  placeholder="Paste post content here…"
+                  className="min-h-[120px] w-full rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-semibold text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900/10"
+                />
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-xs font-semibold text-zinc-500">
+                    Tip: set <span className="text-zinc-700">OPENAI_API_KEY</span> to enable AI layer. Jobs posts never auto-block.
+                  </div>
+                  <Button className="cursor-pointer" onClick={() => void analyzeModeration()} disabled={modState.status === "loading"}>
+                    {modState.status === "loading" ? "Analyzing…" : "Analyze"}
+                  </Button>
+                </div>
+              </div>
+
+              {modState.status !== "idle" && (
+                <div
+                  className={cn(
+                    "mt-3 rounded-2xl border px-4 py-4",
+                    modState.status === "ok"
+                      ? "border-emerald-200 bg-emerald-50"
+                      : modState.status === "error"
+                      ? "border-red-200 bg-red-50"
+                      : "border-zinc-200 bg-zinc-50"
+                  )}
+                >
+                  <div className={cn("text-sm font-semibold", modState.status === "error" ? "text-red-900" : "text-zinc-900")}>
+                    {modState.message}
+                  </div>
+
+                  {(modState.data as any)?.ok === true && (
+                    <>
+                      <Separator className="my-3" />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge
+                          variant={
+                            (modState.data as any).result.decision === "approved"
+                              ? "green"
+                              : (modState.data as any).result.decision === "blocked"
+                              ? "red"
+                              : "amber"
+                          }
+                        >
+                          {(modState.data as any).result.decision}
+                        </Badge>
+                        <Badge variant="default">
+                          conf {(Number((modState.data as any).result.confidence ?? 0) || 0).toFixed(2)}
+                        </Badge>
+                        <Badge variant="default">{(modState.data as any).result.layer}</Badge>
+                        {(modState.data as any).result.model ? <Badge variant="default">{(modState.data as any).result.model}</Badge> : null}
+                        {(modState.data as any).result.isJobsContext ? <Badge variant="amber">Jobs context</Badge> : null}
+                      </div>
+                      {(modState.data as any).result.signals?.length ? (
+                        <div className="mt-3 text-xs font-semibold text-zinc-700">
+                          Signals: <span className="text-zinc-900">{(modState.data as any).result.signals.join(", ")}</span>
+                        </div>
+                      ) : null}
+                      {(modState.data as any).result.reasons?.length ? (
+                        <div className="mt-2 space-y-1">
+                          {(modState.data as any).result.reasons.slice(0, 8).map((r: string, idx: number) => (
+                            <div key={idx} className="text-xs font-semibold text-zinc-700">
+                              - {r}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <Separator className="my-2" />
+
+            <div className="rounded-2xl border border-zinc-200 bg-white px-4 py-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="text-sm font-semibold text-zinc-900">Chat explorer (read-only)</div>
@@ -512,7 +679,7 @@ export default function SkoolIntegrationPage() {
                                 <div className="mt-1 truncate text-xs font-semibold text-zinc-500">{last || "—"}</div>
                               </div>
                               <div className="flex items-center gap-2">
-                                {unread > 0 ? <Badge variant="amber">{unread}</Badge> : <Badge variant="slate">0</Badge>}
+                                {unread > 0 ? <Badge variant="amber">{unread}</Badge> : <Badge variant="default">0</Badge>}
                               </div>
                             </div>
                           </button>
