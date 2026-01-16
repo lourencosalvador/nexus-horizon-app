@@ -10,8 +10,7 @@
  * 5. State machine: awaiting_choice → awaiting_confirmation → complete
  */
 
-import type { SkoolConnectorSession } from "@/features/integrations/skool/lib/skool-session";
-import { skoolSendMessage } from "@/features/conversations/lib/skool-chat";
+import { skoolSendMessage, type SkoolConnectorSession } from "@/features/conversations/lib/skool-chat";
 import {
   getInboxAutomationState,
   setInboxAutomationState,

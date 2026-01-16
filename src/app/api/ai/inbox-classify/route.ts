@@ -1,2 +1,2 @@
-export * from "../../../../../../app/api/ai/inbox-classify/route";
+export * from "../../../../../app/api/ai/inbox-classify/route";
 
