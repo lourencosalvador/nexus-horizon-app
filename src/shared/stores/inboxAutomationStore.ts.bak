@@ -1,0 +1,95 @@
+export type InboxAutomationState = {
+  version: 4;
+  channelId: string;
+  instanceId: string;
+  pendingHuman: boolean;
+  lastProcessedInboundId: string | null;
+  welcomeSent: boolean;
+  welcomeMessageId: string | null;
+  welcomeMessageAt: number | null;
+  stage:
+    | "new"
+    | "awaiting_choice"
+    | "awaiting_path_confirm"
+    | "awaiting_other_goal_text"
+    | "awaiting_other_goal_choice";
+  path: 1 | 2 | 3 | 4 | null;
+  pathStep: number;
+  initialized: boolean;
+  initializedAt: number | null;
+  lastAutoSentAt: number | null;
+};
+
+const KEY = "nexus_inbox_automation_v1";
+
+function safeParse<T>(value: string | null): T | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
+type AllStates = Record<string, InboxAutomationState | undefined>;
+
+function readAll(): AllStates {
+  if (typeof window === "undefined") return {};
+  return safeParse<AllStates>(window.localStorage.getItem(KEY)) ?? {};
+}
+
+function writeAll(next: AllStates) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(KEY, JSON.stringify(next));
+}
+
+function keyFor(instanceId: string, channelId: string) {
+  return \`\${instanceId}:\${channelId}\`;
+}
+
+export function getInboxAutomationState(instanceId: string, channelId: string): InboxAutomationState {
+  const all = readAll();
+  const k = keyFor(instanceId, channelId);
+  const existing = all[k];
+  if (existing && existing.version === 4) return existing;
+  return {
+    version: 4,
+    channelId,
+    instanceId,
+    pendingHuman: false,
+    lastProcessedInboundId: null,
+    welcomeSent: false,
+    welcomeMessageId: null,
+    welcomeMessageAt: null,
+    stage: "new",
+    path: null,
+    pathStep: 0,
+    initialized: false,
+    initializedAt: null,
+    lastAutoSentAt: null,
+  };
+}
+
+export function setInboxAutomationState(instanceId: string, channelId: string, next: InboxAutomationState) {
+  const all = readAll();
+  all[keyFor(instanceId, channelId)] = next;
+  writeAll(all);
+}
+
+export function clearInboxAutomationState(instanceId: string, channelId: string) {
+  const all = readAll();
+  delete all[keyFor(instanceId, channelId)];
+  writeAll(all);
+}
+
+export function getPendingHumanChannels(instanceId: string): Array<{ channelId: string; state: InboxAutomationState }> {
+  const all = readAll();
+  const result: Array<{ channelId: string; state: InboxAutomationState }> = [];
+  for (const [, state] of Object.entries(all)) {
+    if (!state) continue;
+    if (state.instanceId !== instanceId) continue;
+    if (!state.pendingHuman) continue;
+    result.push({ channelId: state.channelId, state });
+  }
+  return result.sort((a, b) => (b.state.initializedAt ?? 0) - (a.state.initializedAt ?? 0));
+}

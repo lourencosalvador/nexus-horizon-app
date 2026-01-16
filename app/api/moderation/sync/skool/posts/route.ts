@@ -16,7 +16,14 @@ const BodySchema = z.object({
   maxPages: z.number().int().min(1).max(30).optional().default(10),
 });
 
+const SKOOL_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
 function extractBuildId(html: string): string | null {
+  // Most reliable: parse the build manifest script src
+  // Example: /_next/static/<buildId>/_buildManifest.js
+  const m0 = html.match(/\/_next\/static\/([^/]+)\/_buildManifest\.js/i);
+  if (m0?.[1]) return m0[1];
   const m1 = html.match(/"buildId"\s*:\s*"([^"]+)"/);
   if (m1?.[1]) return m1[1];
   const m2 = html.match(/buildId"\s*:\s*"([^"]+)"/);
@@ -52,6 +59,38 @@ function extractNextDataJson(html: string): any | null {
     return JSON.parse(raw);
   } catch {
     return null;
+  }
+}
+
+function escapeRegExp(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function collectPostRefsFromHtml(html: string, group: string, refs: Map<string, PostRef>, postObjects?: Map<string, PostTreePost>) {
+  // 1) Parse __NEXT_DATA__ if present
+  const nd = extractNextDataJson(html);
+  if (nd) {
+    if (postObjects) collectPostObjectsFromPostTrees(nd, postObjects);
+    collectPostRefsFromPostTrees(nd, refs);
+    collectPostRefsFromCommonArrays(nd, refs);
+    // Some link_as fields are embedded in JSON too
+    collectPostRefsFromLinks(nd, group, refs);
+  }
+
+  // 2) Regex scan for hrefs like: "/automation-masters/some-post-slug?p=70ba1de8"
+  // This is robust even when the JSON endpoints don't exist.
+  const g = escapeRegExp(group);
+  const re = new RegExp(`\\/${g}\\/([^"?#/]+)\\?[^"\\n]*\\bp=([0-9a-f]{6,32})`, "ig");
+  let m: RegExpExecArray | null = null;
+  while ((m = re.exec(html))) {
+    const slug = (m[1] ?? "").trim();
+    const pid = (m[2] ?? "").trim();
+    if (!slug || !pid) continue;
+    if (!isSlug(slug)) continue;
+    if (!isHexId6to32(pid)) continue;
+    const fullId = isHex32(pid) ? pid : null;
+    const key = fullId ?? slug ?? pid;
+    if (!refs.has(key)) refs.set(key, { id: fullId, slug });
   }
 }
 
@@ -247,7 +286,7 @@ async function api2GetJson(cookie: string, waf: string | null, url: string, refe
       referer,
       accept: "application/json, text/plain;q=0.9, */*;q=0.8",
       "accept-language": "en-US,en;q=0.9",
-      "user-agent": "Mozilla/5.0 (Nexus; Skool Connector)",
+      "user-agent": SKOOL_UA,
     },
     cache: "no-store",
     redirect: "follow",
@@ -321,6 +360,35 @@ function extractContentFromUnknown(p: any): string {
   }
 
   return "";
+}
+
+function resolveAuthorFromPost(p: any): any | null {
+  if (!p || typeof p !== "object") return null;
+
+  // Best case: Skool provides the actual author explicitly.
+  const direct = p?.author;
+  if (direct && typeof direct === "object") return direct;
+
+  // Heuristic: in some Skool payloads, `user` is the *logged-in* user (often the admin),
+  // while the real author id exists in another field. If they disagree, don't trust `user`.
+  const createdBy =
+    p?.created_by ??
+    p?.createdBy ??
+    p?.user_id ??
+    p?.userId ??
+    p?.author_id ??
+    p?.authorId ??
+    null;
+  const createdById = typeof createdBy === "string" || typeof createdBy === "number" ? String(createdBy) : null;
+
+  const user = p?.user;
+  if (user && typeof user === "object") {
+    const userId = user?.id != null ? String(user.id) : null;
+    if (createdById && userId && userId !== createdById) return null;
+    return user;
+  }
+
+  return null;
 }
 
 function summarizeStrings(obj: unknown, opts?: { maxDepth?: number; maxItems?: number }) {
@@ -398,7 +466,7 @@ export async function POST(req: NextRequest) {
 
   // 0) Notifications are a *fallback seed* (they can be biased to admin/announcement activity).
   // We keep them separate so they don't dominate the first `limit` items.
-  let refs = new Map<string, PostRef>();
+  const refs = new Map<string, PostRef>();
   const notifRefs = new Map<string, PostRef>();
   let seedLabelId: string | null = null;
   let seedGroupId: string | null = null;
@@ -443,7 +511,7 @@ export async function POST(req: NextRequest) {
               referer: "https://www.skool.com/",
               accept: "application/json, text/plain;q=0.9, */*;q=0.8",
               "accept-language": "en-US,en;q=0.9",
-              "user-agent": "Mozilla/5.0 (Nexus; Skool Connector)",
+              "user-agent": SKOOL_UA,
             },
             cache: "no-store",
             redirect: "follow",
@@ -521,7 +589,7 @@ export async function POST(req: NextRequest) {
               referer: `https://www.skool.com/${group}`,
               accept: "application/json, text/plain;q=0.9, */*;q=0.8",
               "accept-language": "en-US,en;q=0.9",
-              "user-agent": "Mozilla/5.0 (Nexus; Skool Connector)",
+              "user-agent": SKOOL_UA,
             },
             cache: "no-store",
             redirect: "follow",
@@ -650,103 +718,214 @@ export async function POST(req: NextRequest) {
     // ignore
   }
 
-  // 1) Fetch group HTML (feed view) to get buildId + __NEXT_DATA__ (contains post_tree objects).
+  // 1) Fetch group HTML (prefer posts page) to get buildId + __NEXT_DATA__ (often contains post_tree objects).
   let html = "";
   let nextData: any | null = null;
+  let htmlUrlUsed: string | null = null;
   try {
-    // IMPORTANT: don't default to a label/category. We want the full community feed.
-    // Using a label_id here often results in only "Announcements" (mostly admin posts).
-    // IMPORTANT: omit `c` entirely to avoid "sticky" category behavior.
-    // Using `c=` can still resolve to a user-specific last-used label which can bias results (often admin/announcements).
-    const feedUrl = `https://www.skool.com/${encodeURIComponent(group)}?s=${encodeURIComponent(sort)}&fl=`;
-    const res = await fetchWithRetries(feedUrl, {
-      method: "GET",
-      headers: {
-        cookie,
-        "user-agent": "Mozilla/5.0 (Nexus; Moderation Sync)",
-        accept: "text/html,application/xhtml+xml",
-        "accept-language": "en-US,en;q=0.9",
-        referer: "https://www.skool.com/",
-      },
-      cache: "no-store",
-      redirect: "follow",
-    }, { retries: 2, backoffMs: 300 });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
+    const candidates = [
+      `https://www.skool.com/${encodeURIComponent(group)}/-/posts`,
+      `https://www.skool.com/${encodeURIComponent(group)}?s=${encodeURIComponent(sort)}&fl=`,
+    ];
+
+    let lastStatus = 0;
+    let lastText = "";
+    for (const u of candidates) {
+      const res = await fetchWithRetries(
+        u,
+        {
+          method: "GET",
+          headers: {
+            cookie,
+            "user-agent": SKOOL_UA,
+            accept: "text/html,application/xhtml+xml",
+            "accept-language": "en-US,en;q=0.9",
+            referer: "https://www.skool.com/",
+          },
+          cache: "no-store",
+          redirect: "follow",
+        },
+        { retries: 2, backoffMs: 300 }
+      );
+      lastStatus = res.status;
+      lastText = await res.text().catch(() => "");
+      if (res.ok && lastText) {
+        html = lastText;
+        htmlUrlUsed = u;
+        nextData = extractNextDataJson(html);
+        break;
+      }
+    }
+
+    if (!html) {
       return NextResponse.json(
         {
           ok: false,
-          error: `Failed to fetch group page (${res.status}).`,
-          status: res.status,
-          textPreview: text.slice(0, 2000),
+          error: `Failed to fetch group page (${lastStatus}).`,
+          status: lastStatus,
+          textPreview: lastText.slice(0, 2000),
         },
         { status: 502 }
       );
     }
-    html = await res.text();
-    nextData = extractNextDataJson(html);
   } catch (e) {
     return NextResponse.json(
-      { ok: false, error: e instanceof Error ? `fetch failed for group feed: ${e.message}` : "fetch failed for group feed." },
+      { ok: false, error: e instanceof Error ? `fetch failed for group posts: ${e.message}` : "fetch failed for group posts." },
       { status: 502 }
     );
   }
+
+  // Prefer extracting actual post objects from __NEXT_DATA__ (already authenticated).
+  const postObjects = new Map<string, PostTreePost>();
+  if (nextData) collectPostObjectsFromPostTrees(nextData, postObjects);
 
   const buildId = extractBuildId(html);
   if (!buildId) {
     return NextResponse.json({ ok: false, error: "Could not detect Skool buildId." }, { status: 502 });
   }
 
-  // 2) Fetch Next data JSON for the group page (used as a list source).
-  const qp = new URLSearchParams();
-  // Keep "All" categories by default.
-  qp.set("c", "");
-  qp.set("s", sort);
-  qp.set("fl", "");
-  qp.set("group", group);
-  const listUrl = `https://www.skool.com/_next/data/${encodeURIComponent(buildId)}/${encodeURIComponent(group)}.json?${qp.toString()}`;
-
-  let listJson: any = null;
+  // 1b) HTML scan pagination: when Skool doesn't expose stable JSON routes, we can still discover post slugs/ids
+  // from the rendered feed pages. This usually yields the "full" feed (not only admin-heavy notifications).
+  const htmlScanDebug: { tried: Array<{ url: string; status: number; ok: boolean; newIds: number }> } = { tried: [] };
   try {
-    const res = await fetchWithRetries(listUrl, {
-      method: "GET",
-      headers: {
-        cookie,
-        "user-agent": "Mozilla/5.0 (Nexus; Moderation Sync)",
-        accept: "application/json",
-      },
-      cache: "no-store",
-      redirect: "follow",
-    }, { retries: 2, backoffMs: 300 });
-    listJson = await res.json().catch(() => null);
-    if (!res.ok || !listJson) {
-      return NextResponse.json({ ok: false, error: `Failed to fetch group feed (${res.status}).` }, { status: 502 });
+    const listTarget = Math.min(limit, 200);
+    const base = `https://www.skool.com/${encodeURIComponent(group)}`;
+    // Seed from the first HTML we already fetched.
+    const beforeSeed = refs.size;
+    collectPostRefsFromHtml(html, group, refs, postObjects);
+    const seedNew = refs.size - beforeSeed;
+    if (seedNew > 0 && htmlUrlUsed) htmlScanDebug.tried.push({ url: htmlUrlUsed, status: 200, ok: true, newIds: seedNew });
+
+    let stagnant = 0;
+    for (let page = 2; page <= maxPages && refs.size < listTarget; page++) {
+      const before = refs.size;
+      const candidates: string[] = [];
+      // Different Skool deployments use different pagination params; we try a few.
+      candidates.push(`${base}?s=${encodeURIComponent(sort)}&fl=&p=${page}`);
+      candidates.push(`${base}?s=${encodeURIComponent(sort)}&fl=&page=${page}`);
+      candidates.push(`${base}?p=${page}`);
+      candidates.push(`${base}?page=${page}`);
+
+      let anyOk = false;
+      for (const u of candidates) {
+        const res = await fetchWithRetries(
+          u,
+          {
+            method: "GET",
+            headers: {
+              cookie,
+              "user-agent": SKOOL_UA,
+              accept: "text/html,application/xhtml+xml",
+              "accept-language": "en-US,en;q=0.9",
+              referer: htmlUrlUsed ?? base,
+            },
+            cache: "no-store",
+            redirect: "follow",
+          },
+          { retries: 1, backoffMs: 250 }
+        );
+        const text = await res.text().catch(() => "");
+        if (!res.ok || !text) {
+          htmlScanDebug.tried.push({ url: u, status: res.status, ok: false, newIds: 0 });
+          continue;
+        }
+        anyOk = true;
+        const beforeU = refs.size;
+        collectPostRefsFromHtml(text, group, refs, postObjects);
+        const newIds = refs.size - beforeU;
+        htmlScanDebug.tried.push({ url: u, status: res.status, ok: true, newIds });
+        // If this URL variant yielded new ids, no need to try other variants for the same page.
+        if (newIds > 0) break;
+      }
+
+      if (!anyOk) break;
+      if (refs.size <= before) stagnant++;
+      else stagnant = 0;
+      if (stagnant >= 2) break;
     }
-  } catch (e) {
-    return NextResponse.json(
-      { ok: false, error: e instanceof Error ? `fetch failed for _next/data feed: ${e.message}` : "fetch failed for _next/data feed." },
-      { status: 502 }
-    );
+  } catch {
+    // ignore: we still have notifications + next-data fallback below
   }
 
-  // Prefer extracting actual post objects from __NEXT_DATA__ (most stable, already authenticated).
-  const postObjects = new Map<string, PostTreePost>();
-  if (nextData) {
-    collectPostObjectsFromPostTrees(nextData, postObjects);
+  // 2) Fetch Next data JSON lists, paginating by `p` (same idea as the members page approach).
+  // Primary: /<group>/-/posts.json (stable route); fallback: /<group>.json
+  const nextDataDebug: { tried: Array<{ url: string; status: number; ok: boolean; newIds: number }> } = { tried: [] };
+
+  const fetchNextData = async (url: string) => {
+    const res = await fetchWithRetries(
+      url,
+      {
+        method: "GET",
+        headers: {
+          cookie,
+          "user-agent": SKOOL_UA,
+          accept: "application/json",
+          "x-nextjs-data": "1",
+          "accept-language": "en-US,en;q=0.9",
+          referer: htmlUrlUsed ?? `https://www.skool.com/${group}/-/posts`,
+        },
+        cache: "no-store",
+        redirect: "follow",
+      },
+      { retries: 2, backoffMs: 300 }
+    );
+    const json = await res.json().catch(() => null);
+    return { res, json };
+  };
+
+  const listTarget = Math.min(limit, 200);
+  for (let page = 1; page <= maxPages && refs.size < listTarget; page++) {
+    const before = refs.size;
+
+    const urls: string[] = [];
+    {
+      const u = new URL(`https://www.skool.com/_next/data/${encodeURIComponent(buildId)}/${encodeURIComponent(group)}/-/posts.json`);
+      u.searchParams.set("p", String(page));
+      u.searchParams.set("s", sort);
+      u.searchParams.set("fl", "");
+      u.searchParams.set("group", group);
+      urls.push(u.toString());
+    }
+    {
+      const u = new URL(`https://www.skool.com/_next/data/${encodeURIComponent(buildId)}/${encodeURIComponent(group)}.json`);
+      u.searchParams.set("p", String(page));
+      u.searchParams.set("s", sort);
+      u.searchParams.set("fl", "");
+      u.searchParams.set("group", group);
+      urls.push(u.toString());
+    }
+
+    let anyOk = false;
+    for (const u of urls) {
+      const { res, json } = await fetchNextData(u);
+      if (!res.ok || !json) {
+        nextDataDebug.tried.push({ url: u, status: res.status, ok: res.ok, newIds: 0 });
+        continue;
+      }
+
+      anyOk = true;
+      const tempRefs = new Map<string, PostRef>();
+      collectPostRefsFromPostTrees(json, tempRefs);
+      collectPostRefsFromLinks(json, group, tempRefs);
+      collectPostRefsFromCommonArrays(json, tempRefs);
+
+      const newIds = Array.from(tempRefs.keys()).filter((k) => !refs.has(k)).length;
+      nextDataDebug.tried.push({ url: u, status: res.status, ok: res.ok, newIds });
+
+      // Merge objects + refs
+      collectPostObjectsFromPostTrees(json, postObjects);
+      for (const [k, v] of tempRefs.entries()) refs.set(k, v);
+    }
+
+    if (!anyOk) break;
+    if (refs.size <= before) break;
   }
-  // Also attempt from the _next/data JSON payload (it can contain post_tree as well).
-  collectPostObjectsFromPostTrees(listJson, postObjects);
+
   // Merge any post objects gathered from api2 feed attempts.
   for (const [id, post] of api2PostObjects.entries()) {
     if (!postObjects.has(id)) postObjects.set(id, post);
   }
 
-  // Always merge refs from post_tree (ids) + link_as (?p=<id>) + notifications.
-  collectPostRefsFromPostTrees(nextData ?? listJson, refs);
-  collectPostRefsFromPostTrees(listJson, refs);
-  collectPostRefsFromLinks(listJson, group, refs);
-  collectPostRefsFromCommonArrays(nextData ?? listJson, refs);
-  collectPostRefsFromCommonArrays(listJson, refs);
   // Merge notification refs last so they don't dominate the first `limit` items.
   mergeRefsInto(refs, notifRefs);
 
@@ -756,11 +935,11 @@ export async function POST(req: NextRequest) {
       ok: true,
       group,
       buildId,
-      listUrl,
       detected: 0,
       synced: 0,
-      note: "No post ids detected (checked notifications + feed links).",
+      note: "No post ids detected (checked next-data + notifications).",
       debug: {
+        nextData: nextDataDebug,
         notifications: notifDebug,
         api2: api2Debug,
       },
@@ -802,7 +981,7 @@ export async function POST(req: NextRequest) {
             origin: "https://www.skool.com",
             referer: `https://www.skool.com/${group}`,
             accept: "application/json, text/plain;q=0.9, */*;q=0.8",
-            "user-agent": "Mozilla/5.0 (Nexus; Moderation Sync)",
+            "user-agent": SKOOL_UA,
           },
           cache: "no-store",
           redirect: "follow",
@@ -903,7 +1082,7 @@ export async function POST(req: NextRequest) {
           : null;
       const categoryId = typeof p?.category?.id === "string" ? p.category.id : typeof p?.category_id === "string" ? p.category_id : null;
       const createdAt = typeof p?.created_at === "string" ? p.created_at : typeof p?.createdAt === "string" ? p.createdAt : null;
-      const authorObj = p?.author ?? p?.user ?? null;
+      const authorObj = resolveAuthorFromPost(p);
       const groupId = typeof p?.group_id === "string" ? p.group_id : null;
 
       const analyzed = await analyzePost({
@@ -959,7 +1138,6 @@ export async function POST(req: NextRequest) {
     ok: true,
     group,
     buildId,
-    listUrl,
     detected: postRefs.length,
     synced,
     flagged,
@@ -968,6 +1146,8 @@ export async function POST(req: NextRequest) {
     persisted: Boolean(supabase),
     results,
     debug: {
+      htmlScan: htmlScanDebug,
+      nextData: nextDataDebug,
       api2: api2Debug,
       notifications: notifDebug,
     },

@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { decryptString } from "../../_crypto";
 
+export const runtime = "nodejs";
+
 const BodySchema = z.object({
   encryptedCookie: z.string().min(10),
 });

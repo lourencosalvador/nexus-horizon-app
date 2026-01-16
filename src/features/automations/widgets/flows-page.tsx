@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { cubicBezier, motion } from "framer-motion";
+import { AnimatePresence, cubicBezier, motion } from "framer-motion";
 import {
   ArrowUpRight,
   CheckCircle2,
   Check,
+  Settings,
   Copy,
   ChevronDown,
   Filter,
   GitBranch,
+  Maximize2,
   Plus,
   X,
   ZoomIn,
@@ -28,6 +30,7 @@ import { Input } from "@/shared/ui/input";
 import { Separator } from "@/shared/ui/separator";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { FlowCanvasReactFlow } from "@/features/automations/widgets/flow-canvas-reactflow";
 
 type FlowStatus = "enabled" | "paused" | "draft";
 
@@ -50,6 +53,7 @@ type FlowEdge = {
   id: string;
   from: string;
   to: string;
+  label?: string;
 };
 
 type Flow = {
@@ -287,11 +291,11 @@ export default function FlowsPage() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FlowStatus | "all">("all");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [viewport, setViewport] = useState<{ x: number; y: number; scale: number }>({ x: 0, y: 0, scale: 1 });
-  const [panning, setPanning] = useState(false);
-  const [dragging, setDragging] = useState<{ id: string; dx: number; dy: number } | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
+  const [expandedOpen, setExpandedOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
+  const configRef = useRef<HTMLDivElement | null>(null);
   const [createName, setCreateName] = useState("");
   const [createTrigger, setCreateTrigger] = useState<FlowTrigger>({ type: "message_received", channel: "inbox" });
   const [createStatus, setCreateStatus] = useState<FlowStatus>("draft");
@@ -299,10 +303,9 @@ export default function FlowsPage() {
   const [statusOpen, setStatusOpen] = useState(false);
 
   const modalRef = useRef<HTMLDivElement | null>(null);
+  const expandedRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLDivElement | null>(null);
   const statusRef = useRef<HTMLDivElement | null>(null);
-  const canvasRef = useRef<HTMLDivElement | null>(null);
-  const panRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null);
 
   useEffect(() => {
     fetch("/api/auth/me")
@@ -365,6 +368,49 @@ export default function FlowsPage() {
   }, [createOpen]);
 
   useEffect(() => {
+    if (!expandedOpen) return;
+
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpandedOpen(false);
+    };
+    const onPointerDown = (e: MouseEvent) => {
+      const el = expandedRef.current;
+      if (!el) return;
+      if (e.target instanceof Node && !el.contains(e.target)) setExpandedOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("mousedown", onPointerDown);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("mousedown", onPointerDown);
+    };
+  }, [expandedOpen]);
+
+  useEffect(() => {
+    if (!configOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConfigOpen(false);
+    };
+    const onPointerDown = (e: MouseEvent) => {
+      const t = e.target;
+      if (!(t instanceof Node)) return;
+      const el = configRef.current;
+      if (!el) return;
+      if (!el.contains(t)) setConfigOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("mousedown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("mousedown", onPointerDown);
+    };
+  }, [configOpen]);
+
+  useEffect(() => {
     if (!triggerOpen && !statusOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -399,7 +445,6 @@ export default function FlowsPage() {
     if (!selected) return;
     queueMicrotask(() => {
       setSelectedNodeId(selected.nodes[0]?.id ?? null);
-      setViewport({ x: 0, y: 0, scale: 1 });
     });
   }, [selected?.id]);
 
@@ -436,47 +481,35 @@ export default function FlowsPage() {
     });
   };
 
-  const zoomTo = (nextScale: number) => {
-    setViewport((v) => ({ ...v, scale: clamp(nextScale, 0.55, 1.8) }));
-  };
-
-  const resetView = () => setViewport({ x: 0, y: 0, scale: 1 });
-
-  const fitToFlow = () => {
-    if (!selected || !canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const pad = 90;
-    const xs = selected.nodes.map((n) => n.x);
-    const ys = selected.nodes.map((n) => n.y);
-    const minX = Math.min(...xs) - pad;
-    const maxX = Math.max(...xs) + 240 + pad;
-    const minY = Math.min(...ys) - pad;
-    const maxY = Math.max(...ys) + 120 + pad;
-    const w = Math.max(1, maxX - minX);
-    const h = Math.max(1, maxY - minY);
-    const s = clamp(Math.min(rect.width / w, rect.height / h), 0.6, 1.25);
-    const cx = minX + w / 2;
-    const cy = minY + h / 2;
-    setViewport({ scale: s, x: rect.width / 2 - cx * s, y: rect.height / 2 - cy * s });
-  };
-
   const addNode = (kind: Exclude<FlowNodeKind, "trigger">) => {
     if (!selected) return;
+    
+    // Safety check: ensure flow has a trigger
+    const hasTrigger = selected.nodes.some((n) => n.kind === "trigger");
+    if (!hasTrigger) {
+      toast.error("❌ Erro: Flow sem trigger! Use o botão EMERGENCY RESET primeiro.");
+      return;
+    }
+    
+    // Safety check: prevent too many nodes
+    if (selected.nodes.length >= 50) {
+      toast.error("❌ Limite de 50 nodes atingido! Use o botão EMERGENCY RESET para limpar.");
+      return;
+    }
+    
     const now = Date.now();
     const id = `${selected.id}_n_${kind}_${now}`;
-    const rect = canvasRef.current?.getBoundingClientRect();
-    const cx = rect ? (rect.width / 2 - viewport.x) / viewport.scale : 420;
-    const cy = rect ? (rect.height / 2 - viewport.y) / viewport.scale : 200;
     const label = kind === "condition" ? "New condition" : kind === "guardrail" ? "New guardrail" : "New action";
 
     updateFlow(selected.id, (f) => {
-      const node: FlowNode = { id, kind, label, x: Math.round(cx + 80), y: Math.round(cy) };
       const last = f.nodes.filter((n) => n.kind !== "trigger").slice(-1)[0] ?? f.nodes[0];
-      const edge: FlowEdge = { id: `${selected.id}_e_${now}`, from: last.id, to: node.id };
+      const node: FlowNode = { id, kind, label, x: (last?.x ?? 80) + 280, y: last?.y ?? 160 };
+      const edge: FlowEdge = { id: `${selected.id}_e_${now}`, from: last.id, to: node.id, label: "" };
       return { ...f, nodes: [...f.nodes, node], edges: [...f.edges, edge], updatedAt: Date.now() };
     });
 
     setSelectedNodeId(id);
+    toast.success(`✅ ${label} added! (${selected.nodes.length + 1} nodes total)`);
   };
 
   const deleteSelectedNode = () => {
@@ -577,7 +610,12 @@ export default function FlowsPage() {
   };
 
   return (
-    <motion.div variants={container} initial="hidden" animate="show" className="flex flex-col gap-6">
+    <motion.div
+      variants={container}
+      initial="hidden"
+      animate="show"
+      className="flex h-full min-h-0 flex-col gap-6 overflow-hidden"
+    >
       <motion.div variants={item} className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-extrabold tracking-tight text-zinc-900">Flows</h1>
@@ -736,43 +774,71 @@ export default function FlowsPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="truncate text-xl font-extrabold text-zinc-900">{selected.name}</div>
                     <Badge variant={statusBadge(selected.status).variant}>{statusBadge(selected.status).label}</Badge>
-                    <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-bold text-zinc-700">
-                      {selected.runs7d} runs / 7d
-                    </span>
                   </div>
-                  <div className="mt-2 text-sm text-zinc-600">
-                    Trigger: <span className="font-semibold text-zinc-900">{triggerLabel(selected.trigger)}</span>
-                  </div>
-                  <div className="mt-2 text-xs font-semibold text-zinc-500">Last updated: {formatTime(selected.updatedAt)}</div>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="cursor-pointer"
-                    onClick={() => selected && toggleStatus(selected.id)}
+                <div className="relative" ref={configRef}>
+                  <button
+                    type="button"
+                    className="cursor-pointer inline-flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm hover:bg-zinc-50"
+                    aria-label="Flow settings"
+                    title="Settings"
+                    onClick={() => setConfigOpen((v) => !v)}
                   >
-                    <Filter size={14} />
-                    {selected.status === "enabled" ? "Pause" : "Enable"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="cursor-pointer"
-                    onClick={() => selected && duplicateFlow(selected.id)}
-                  >
-                    <Copy size={14} />
-                    Duplicate
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    className="cursor-pointer"
-                    onClick={() => selected && deleteFlow(selected.id)}
-                  >
-                    <Trash2 size={14} />
-                    Delete
-                  </Button>
+                    <Settings size={16} />
+                  </button>
+
+                  {configOpen && (
+                    <div className="absolute right-0 mt-2 w-56 overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-[0_18px_60px_rgba(0,0,0,0.18)]">
+                      <button
+                        type="button"
+                        className="w-full cursor-pointer px-4 py-3 text-left text-sm font-semibold text-zinc-900 hover:bg-zinc-50"
+                        onClick={() => {
+                          setConfigOpen(false);
+                          toggleStatus(selected.id);
+                        }}
+                      >
+                        {selected.status === "enabled" ? "Pause" : "Enable"}
+                      </button>
+                      <button
+                        type="button"
+                        className="w-full cursor-pointer px-4 py-3 text-left text-sm font-semibold text-zinc-900 hover:bg-zinc-50"
+                        onClick={() => {
+                          setConfigOpen(false);
+                          duplicateFlow(selected.id);
+                        }}
+                      >
+                        Duplicate
+                      </button>
+                      <button
+                        type="button"
+                        className="w-full cursor-pointer px-4 py-3 text-left text-sm font-semibold text-zinc-900 hover:bg-zinc-50"
+                        onClick={() => {
+                          setConfigOpen(false);
+                          if (!confirm("Reset this flow? This will remove all nodes and edges (except the trigger).")) return;
+                          updateFlow(selected.id, (f) => {
+                            const triggerNode = f.nodes.find((n) => n.kind === "trigger") ?? f.nodes[0];
+                            return { ...f, nodes: triggerNode ? [triggerNode] : [], edges: [], updatedAt: Date.now() };
+                          });
+                          setSelectedNodeId(selected.nodes.find((n) => n.kind === "trigger")?.id ?? selected.nodes[0]?.id ?? null);
+                          toast.success("Flow reset.");
+                        }}
+                      >
+                        Reset flow
+                      </button>
+                      <div className="h-px bg-zinc-100" />
+                      <button
+                        type="button"
+                        className="w-full cursor-pointer px-4 py-3 text-left text-sm font-semibold text-red-600 hover:bg-red-50"
+                        onClick={() => {
+                          setConfigOpen(false);
+                          if (!confirm("Delete this flow?")) return;
+                          deleteFlow(selected.id);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -812,59 +878,22 @@ export default function FlowsPage() {
                         variant="outline"
                         size="sm"
                         className="cursor-pointer"
-                        onClick={() => addNode("condition")}
+                        onClick={() => (window.location.href = `/dashboard/automations/flows/editor?flowId=${encodeURIComponent(selected.id)}`)}
                       >
-                        <GitBranch size={14} />
-                        Condition
+                        Expand
+                        <ArrowUpRight size={14} />
                       </Button>
                       <Button
                         variant="outline"
                         size="sm"
                         className="cursor-pointer"
-                        onClick={() => addNode("guardrail")}
+                        onClick={() => setExpandedOpen(true)}
+                        aria-label="Expand flow in modal"
+                        title="Expand"
                       >
-                        <SlidersHorizontal size={14} />
-                        Guardrail
+                        <Maximize2 size={14} />
                       </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="cursor-pointer"
-                        onClick={() => addNode("action")}
-                      >
-                        <CheckCircle2 size={14} />
-                        Action
-                      </Button>
-                      <Separator className="hidden sm:block mx-1 h-8" />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="cursor-pointer"
-                        onClick={() => zoomTo(viewport.scale - 0.1)}
-                      >
-                        <ZoomOut size={14} />
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="cursor-pointer"
-                        onClick={() => zoomTo(viewport.scale + 0.1)}
-                      >
-                        <ZoomIn size={14} />
-                      </Button>
-                      <Button variant="outline" size="sm" className="cursor-pointer" onClick={resetView}>
-                        Reset
-                      </Button>
-                      <Button variant="outline" size="sm" className="cursor-pointer" onClick={fitToFlow}>
-                        <LocateFixed size={14} />
-                        Fit
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="cursor-pointer"
-                        onClick={() => (window.location.href = "/dashboard/automations/simulator")}
-                      >
+                      <Button variant="outline" size="sm" className="cursor-pointer" onClick={() => (window.location.href = "/dashboard/automations/simulator")}>
                         Run in simulator
                         <ArrowUpRight size={14} />
                       </Button>
@@ -872,156 +901,32 @@ export default function FlowsPage() {
                         variant="destructive"
                         size="sm"
                         className="cursor-pointer"
-                        onClick={deleteSelectedNode}
-                        disabled={!selectedNodeId || selected.nodes.find((n) => n.id === selectedNodeId)?.kind === "trigger"}
+                        onClick={() => setConfigOpen(true)}
                       >
                         <Trash2 size={14} />
-                        Delete node
+                        Settings
                       </Button>
                     </div>
                   </div>
                   <div className="mt-3 text-xs font-semibold text-zinc-500">
-                    Drag nodes to reposition. Drag empty space to pan. Scroll to zoom.
+                    Drag nodes to reposition. Use the mini controls to pan/zoom.
                   </div>
                 </div>
 
-                <div
-                  ref={canvasRef}
-                  className={cn(
-                    "relative flex-1 min-h-0 overflow-hidden bg-[#F7F8FA] select-none",
-                    panning ? "cursor-grabbing" : "cursor-grab"
-                  )}
-                  onWheel={(e) => {
-                    if (!canvasRef.current) return;
-                    e.preventDefault();
-                    const rect = canvasRef.current.getBoundingClientRect();
-                    const mx = e.clientX - rect.left;
-                    const my = e.clientY - rect.top;
-                    const delta = e.deltaY > 0 ? -0.08 : 0.08;
-                    const nextScale = clamp(viewport.scale + delta, 0.55, 1.8);
-                    const wx = (mx - viewport.x) / viewport.scale;
-                    const wy = (my - viewport.y) / viewport.scale;
-                    const nx = mx - wx * nextScale;
-                    const ny = my - wy * nextScale;
-                    setViewport({ scale: nextScale, x: nx, y: ny });
-                  }}
-                  onPointerDown={(e) => {
-                    const target = e.target as HTMLElement;
-                    if (target.closest("[data-node]")) return;
-                    setPanning(true);
-                    panRef.current = { sx: e.clientX, sy: e.clientY, vx: viewport.x, vy: viewport.y };
-                  }}
-                  onPointerMove={(e) => {
-                    if (dragging && selected) {
-                      const rect = canvasRef.current?.getBoundingClientRect();
-                      if (!rect) return;
-                      const cx = (e.clientX - rect.left - viewport.x) / viewport.scale;
-                      const cy = (e.clientY - rect.top - viewport.y) / viewport.scale;
-                      const nx = cx - dragging.dx;
-                      const ny = cy - dragging.dy;
+                <FlowCanvasReactFlow
+                  flow={selected}
+                  selectedNodeId={selectedNodeId}
+                  onSelectedNodeIdChange={setSelectedNodeId}
+                  onFlowChange={(next) =>
                       updateFlow(selected.id, (f) => ({
                         ...f,
-                        nodes: f.nodes.map((n) => (n.id === dragging.id ? { ...n, x: nx, y: ny } : n)),
+                      nodes: next.nodes as any,
+                      edges: next.edges as any,
                         updatedAt: Date.now(),
-                      }));
-                      return;
-                    }
-
-                    if (!panning || !panRef.current) return;
-                    const dx = e.clientX - panRef.current.sx;
-                    const dy = e.clientY - panRef.current.sy;
-                    setViewport((v) => ({ ...v, x: panRef.current!.vx + dx, y: panRef.current!.vy + dy }));
-                  }}
-                  onPointerUp={() => {
-                    setPanning(false);
-                    panRef.current = null;
-                    setDragging(null);
-                  }}
-                >
-                  <div
-                    aria-hidden="true"
-                    className="pointer-events-none absolute inset-0 opacity-70"
-                    style={{
-                      backgroundImage:
-                        "linear-gradient(rgba(24,24,27,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(24,24,27,0.06) 1px, transparent 1px)",
-                      backgroundSize: "28px 28px",
-                      backgroundPosition: `${viewport.x % 28}px ${viewport.y % 28}px`,
-                    }}
-                  />
-
-                  <div
-                    className="absolute inset-0"
-                    style={{
-                      transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
-                      transformOrigin: "0 0",
-                    }}
-                  >
-                    <svg className="absolute inset-0 h-full w-full" aria-hidden="true">
-                      <defs>
-                        <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
-                          <path d="M0,0 L9,3 L0,6 Z" fill="rgba(24,24,27,0.35)" />
-                        </marker>
-                      </defs>
-                      {selected.edges.map((e) => {
-                        const from = selected.nodes.find((n) => n.id === e.from);
-                        const to = selected.nodes.find((n) => n.id === e.to);
-                        if (!from || !to) return null;
-                        const x1 = from.x + 240;
-                        const y1 = from.y + 34;
-                        const x2 = to.x;
-                        const y2 = to.y + 34;
-                        const c1 = x1 + 80;
-                        const c2 = x2 - 80;
-                        const d = `M ${x1} ${y1} C ${c1} ${y1}, ${c2} ${y2}, ${x2} ${y2}`;
-                        return <path key={e.id} d={d} fill="none" stroke="rgba(24,24,27,0.22)" strokeWidth="2" markerEnd="url(#arrow)" />;
-                      })}
-                    </svg>
-
-                    {selected.nodes.map((n) => {
-                      const Icon = nodeIcon(n.kind);
-                      const isActive = n.id === selectedNodeId;
-                      const isDragging = dragging?.id === n.id;
-                      return (
-                        <div
-                          key={n.id}
-                          data-node
-                          className={cn(
-                            "absolute w-[240px] rounded-2xl border bg-white shadow-sm transition-colors touch-none",
-                            nodeTone(n.kind),
-                            isActive ? "ring-2 ring-blue-600/20" : "hover:bg-white",
-                            isDragging ? "cursor-grabbing" : "cursor-grab active:cursor-grabbing"
-                          )}
-                          style={{ left: n.x, top: n.y }}
-                          onPointerDown={(e) => {
-                            e.stopPropagation();
-                            if (!canvasRef.current) return;
-                            const rect = canvasRef.current.getBoundingClientRect();
-                            const cx = (e.clientX - rect.left - viewport.x) / viewport.scale;
-                            const cy = (e.clientY - rect.top - viewport.y) / viewport.scale;
-                            setDragging({ id: n.id, dx: cx - n.x, dy: cy - n.y });
-                            setSelectedNodeId(n.id);
-                          }}
-                          onClick={() => setSelectedNodeId(n.id)}
-                        >
-                          <div className="flex items-start gap-3 px-4 py-4">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-200 bg-white">
-                              <Icon size={16} className="text-zinc-900" />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-xs font-bold uppercase tracking-widest text-zinc-500">
-                                  {nodeLabel(n.kind)}
-                                </span>
-                                <span className="text-[11px] font-bold text-zinc-600">Drag</span>
-                              </div>
-                              <div className="mt-1 truncate text-sm font-semibold text-zinc-900">{n.label}</div>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
+                    }))
+                  }
+                  className="flex-1"
+                />
               </div>
             )}
           </CardContent>
@@ -1218,6 +1123,87 @@ export default function FlowsPage() {
           </motion.div>
         </div>
       )}
+
+      <AnimatePresence>
+        {expandedOpen && selected && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6">
+            <motion.button
+              type="button"
+              aria-label="Close"
+              className="absolute inset-0 cursor-pointer bg-zinc-950/40 backdrop-blur-md"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18, ease }}
+              onClick={() => setExpandedOpen(false)}
+            />
+
+            <motion.div
+              ref={expandedRef}
+              initial={{ opacity: 0, y: 26, scale: 0.96, rotateX: -10 }}
+              animate={{ opacity: 1, y: 0, scale: 1, rotateX: 0 }}
+              exit={{ opacity: 0, y: 18, scale: 0.97, rotateX: -6 }}
+              transition={{ type: "spring", stiffness: 420, damping: 30, mass: 0.8 }}
+              style={{ transformPerspective: 1200 }}
+              className="relative flex h-[calc(100vh-1.5rem)] w-[min(1400px,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-3xl border border-white/10 bg-white shadow-[0_40px_120px_-40px_rgba(0,0,0,0.85)]"
+            >
+              <div className="relative border-b border-zinc-200/80 bg-linear-to-r from-zinc-50 via-white to-zinc-50 px-4 py-3">
+                <div className="pointer-events-none absolute inset-0 opacity-70 [background:radial-gradient(circle_at_30%_30%,rgba(59,130,246,0.12),transparent_45%),radial-gradient(circle_at_80%_10%,rgba(236,72,153,0.10),transparent_40%)]" />
+                <div className="relative flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-2xl border border-zinc-200 bg-white">
+                      <Workflow size={16} className="text-zinc-900" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-extrabold text-zinc-900">{selected.name}</div>
+                      <div className="truncate text-xs font-semibold text-zinc-500">Expanded canvas</div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="cursor-pointer"
+                      onClick={() =>
+                        (window.location.href = `/dashboard/automations/flows/editor?flowId=${encodeURIComponent(selected.id)}`)
+                      }
+                    >
+                      Full page
+                      <ArrowUpRight size={14} />
+                    </Button>
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded-2xl border border-zinc-200 bg-white p-2 text-zinc-700 hover:bg-zinc-50"
+                      onClick={() => setExpandedOpen(false)}
+                      aria-label="Close"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex-1 min-h-0 bg-zinc-50">
+                <FlowCanvasReactFlow
+                  flow={selected}
+                  selectedNodeId={selectedNodeId}
+                  onSelectedNodeIdChange={setSelectedNodeId}
+                  onFlowChange={(next) =>
+                    updateFlow(selected.id, (f) => ({
+                      ...f,
+                      nodes: next.nodes as any,
+                      edges: next.edges as any,
+                      updatedAt: Date.now(),
+                    }))
+                  }
+                  className="h-full"
+                />
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }

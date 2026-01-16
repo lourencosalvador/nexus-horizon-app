@@ -1,8 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { chromium } from "playwright";
 import { encryptString } from "../../_crypto";
-import { Builder, By, until, type WebDriver } from "selenium-webdriver";
-import chrome from "selenium-webdriver/chrome";
+
+export const runtime = "nodejs";
 
 type CreateSessionBody = {
   baseUrl?: string;
@@ -37,8 +36,11 @@ function mergeCookies(a: Array<{ name: string; value: string }>, b: Array<{ name
 }
 
 async function runSeleniumLogin(baseUrl: string, email: string, password: string) {
+  const { Builder, By, until } = await import("selenium-webdriver");
+  const chrome = (await import("selenium-webdriver/chrome")).default;
+
   const hub = process.env.SELENIUM_HUB_URL || "http://selenium:4444/wd/hub";
-  let driver: WebDriver | null = null;
+  let driver: import("selenium-webdriver").WebDriver | null = null;
   try {
     const options = new chrome.Options()
       .addArguments("--no-sandbox")
@@ -157,6 +159,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "Invalid email or password." }, { status: 400 });
   }
 
+  // IMPORTANT: In Vercel/serverless, browser automation is often blocked or heavyweight.
+  // Keep email/password as an optional connector behind an explicit flag.
+  const allowPasswordLogin = String(process.env.ENABLE_SKOOL_PASSWORD_LOGIN || "").toLowerCase() === "true";
+  if (!allowPasswordLogin) {
+    return NextResponse.json(
+      {
+        ok: false,
+        connector: "password",
+        error:
+          "Password login is disabled in this environment. Use Cookie mode, or set ENABLE_SKOOL_PASSWORD_LOGIN=true (and USE_SELENIUM_GRID=true) to enable password login.",
+      },
+      { status: 400 }
+    );
+  }
+
   // IMPORTANT: We do not store the password. We only use it to establish a session and extract cookies.
   // This is a best-effort headless flow and may break if Skool changes their login UI.
   const useSelenium = String(process.env.USE_SELENIUM_GRID || "").toLowerCase() === "true";
@@ -168,6 +185,23 @@ export async function POST(req: NextRequest) {
       const r = await runSeleniumLogin(baseUrl, email, password);
       cookieHeader = r.cookieHeader;
     } else {
+      // Playwright is optional. If it's not installed (or browsers aren't available), we return a helpful error.
+      let chromium: any;
+      try {
+        const pw = (await import("playwright")) as any;
+        chromium = pw.chromium;
+      } catch {
+        return NextResponse.json(
+          {
+            ok: false,
+            connector: "playwright",
+            error:
+              "Playwright is not available in this deployment. Use Cookie mode, or enable Selenium Grid (USE_SELENIUM_GRID=true + SELENIUM_HUB_URL).",
+          },
+          { status: 400 }
+        );
+      }
+
       const browser = await chromium.launch({ headless: true });
       const context = await browser.newContext({
         userAgent: "Mozilla/5.0 (Nexus; Skool Connector)",

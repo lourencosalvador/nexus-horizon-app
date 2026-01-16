@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Image from "next/image";
 import { AnimatePresence, motion } from "framer-motion";
@@ -58,6 +58,8 @@ function displayName(user: AuthUser | null) {
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
+  const isFlowsEditor = pathname.startsWith("/dashboard/automations/flows/editor");
+  const isFlowsList = pathname === "/dashboard/automations/flows";
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isNavigating, startTransition] = useTransition();
@@ -115,7 +117,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     },
     {
       title: "Moderation",
-      items: [{ name: "Posts", icon: ShieldCheck, href: "/dashboard/moderation/posts" }],
+      items: [
+        { name: "Posts", icon: ShieldCheck, href: "/dashboard/moderation/posts" },
+        { name: "Human Review", icon: AlertTriangle, href: "/dashboard/conversations/review" },
+      ],
     },
     {
       title: "Integrations",
@@ -159,23 +164,30 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     enabled: Boolean(skoolConnector),
     refetchInterval: skoolConnector ? 15_000 : false,
     queryFn: async () => {
-      if (!skoolConnector) return { messages: [] as any[] };
+      if (!skoolConnector) return { messages: [] as unknown[] };
       return await skoolListNotifications(skoolConnector, { limit: 30, type: "all" });
     },
   });
 
+  type SkoolNotificationsResponse = { messages?: unknown[] };
+
   const parsedNotifications = (() => {
-    const msgs = (skoolNotificationsQuery.data as any)?.messages as Array<any> | undefined;
+    const msgs = (skoolNotificationsQuery.data as SkoolNotificationsResponse | undefined)?.messages;
     const list = Array.isArray(msgs) ? msgs : [];
     return list
       .map((m) => {
-        const createdAt = m?.created_at ? Date.parse(String(m.created_at)) : 0;
-        const data = parseSkoolNotificationData(m?.metadata?.data);
+        const rec = (m ?? {}) as Record<string, unknown>;
+        const createdAtRaw = rec["created_at"];
+        const createdAt = createdAtRaw ? Date.parse(String(createdAtRaw)) : 0;
+        const metadata = (rec["metadata"] ?? {}) as Record<string, unknown>;
+        const metadataData = (metadata["data"] ?? undefined) as unknown;
+        const dataRaw = typeof metadataData === "string" ? metadataData : undefined;
+        const data = parseSkoolNotificationData(dataRaw);
         return {
-          id: String(m?.id ?? ""),
+          id: String(rec["id"] ?? ""),
           createdAt: Number.isFinite(createdAt) ? createdAt : 0,
-          unread: Boolean(m?.unread) || Boolean(m?.metadata?.unread),
-          type: Number(m?.metadata?.type ?? 0) || 0,
+          unread: Boolean(rec["unread"]) || Boolean((metadata as Record<string, unknown>)["unread"]),
+          type: Number((metadata as Record<string, unknown>)["type"] ?? 0) || 0,
           data,
         };
       })
@@ -208,14 +220,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     for (const n of parsedNotifications) {
       if (prevNotifIdsRef.current.has(n.id)) continue;
       prevNotifIdsRef.current.add(n.id);
-      pushToast({
-        id: `notif_${n.id}`,
-        kind: "notification",
-        title: "Notification",
-        body: n.data?.text ?? "New activity",
-        imageUrl: n.data?.image_url,
-        ts: n.createdAt || Date.now(),
-      });
+      queueMicrotask(() =>
+        pushToast({
+          id: `notif_${n.id}`,
+          kind: "notification",
+          title: "Notification",
+          body: n.data?.text ?? "New activity",
+          imageUrl: n.data?.image_url,
+          ts: n.createdAt || Date.now(),
+        })
+      );
       break;
     }
   }, [skoolConnector?.encryptedCookie, skoolNotificationsQuery.isLoading, parsedNotifications]);
@@ -238,14 +252,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       next[c.id] = unread;
       const before = prev[c.id] ?? 0;
       if (unread > before) {
-        pushToast({
-          id: `msg_${c.id}_${Date.now()}`,
-          kind: "message",
-          title: skoolDisplayName(c),
-          body: c.last_message?.metadata?.content?.trim() || "New message",
-          imageUrl: c.user?.metadata?.picture_profile,
-          ts: Date.now(),
-        });
+        queueMicrotask(() =>
+          pushToast({
+            id: `msg_${c.id}_${Date.now()}`,
+            kind: "message",
+            title: skoolDisplayName(c),
+            body: c.last_message?.metadata?.content?.trim() || "New message",
+            imageUrl: c.user?.metadata?.picture_profile,
+            ts: Date.now(),
+          })
+        );
         break;
       }
     }
@@ -317,6 +333,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const pictureSrc = undefined;
 
+  if (isFlowsEditor) {
+    // Fullscreen editor: hide the dashboard sidebar chrome.
+    return <div className="h-screen w-screen bg-[#F2F4F7]">{children}</div>;
+  }
+
   return (
     <div className="flex h-screen bg-[#F8F9FA] font-sans text-zinc-900">
       <aside
@@ -331,7 +352,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 {pictureSrc ? (
                   <Image src={pictureSrc} alt="Profile" fill className="object-cover" />
                 ) : (
-                  <div className="flex h-full w-full items-center justify-center text-white font-bold bg-gradient-to-br from-blue-500 to-blue-700">
+                  <div className="flex h-full w-full items-center justify-center text-white font-bold bg-linear-to-br from-blue-500 to-blue-700">
                     {displayName(user).charAt(0).toUpperCase()}
                   </div>
                 )}
@@ -366,7 +387,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 {pictureSrc ? (
                   <Image src={pictureSrc} alt="Profile" fill className="object-cover" />
                 ) : (
-                  <div className="flex h-full w-full items-center justify-center text-white font-bold bg-gradient-to-br from-blue-500 to-blue-700">
+                  <div className="flex h-full w-full items-center justify-center text-white font-bold bg-linear-to-br from-blue-500 to-blue-700">
                     {displayName(user).charAt(0).toUpperCase()}
                   </div>
                 )}
@@ -475,12 +496,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </div>
       </aside>
 
-      <main className="relative flex-1 overflow-y-auto bg-[#F2F4F7]">
-        <div className="p-8">
-          {children}
-        </div>
+      <main className={`relative flex-1 min-h-0 bg-[#F2F4F7] ${isFlowsList ? "overflow-hidden" : "overflow-y-auto"}`}>
+        <div className={isFlowsList ? "p-8 h-full min-h-0" : "p-8"}>{children}</div>
 
-        <div className="fixed bottom-6 right-6 z-[60] w-[380px] max-w-[calc(100vw-48px)] space-y-3 pointer-events-none">
+        <div className="fixed bottom-6 right-6 z-60 w-[380px] max-w-[calc(100vw-48px)] space-y-3 pointer-events-none">
           <AnimatePresence>
             {toastStack.map((t) => (
               <motion.div

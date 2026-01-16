@@ -15,6 +15,7 @@ import { Avatar } from "@/shared/ui/avatar";
 import { getActiveInstance, getActiveInstanceId, getStoredInstances, setStoredInstances } from "@/shared/stores/instanceStore";
 import { getSkoolApiPostsConfig } from "@/shared/stores/skoolApiPostsConfigStore";
 import { getSkoolSession } from "@/shared/stores/skoolSessionStore";
+import { extractSkoolGroupSlug } from "@/shared/utils/skool";
 
 type ModerationResult = {
   decision: "approved" | "needs_review" | "blocked";
@@ -178,7 +179,7 @@ export default function ModerationPostsPage() {
   const [syncing, setSyncing] = useState(false);
   const cfg = activeInstanceId ? getSkoolApiPostsConfig(activeInstanceId) : null;
   const skoolSession = activeInstanceId ? getSkoolSession(activeInstanceId) : null;
-  const groupSlug = active?.url?.includes("skool.com/") ? active.url.split("skool.com/").pop()?.trim() ?? null : null;
+  const groupSlug = extractSkoolGroupSlug(active?.url);
 
   const listQuery = useQuery({
     queryKey: ["moderation", "items", "post", filter, page],
@@ -263,8 +264,8 @@ export default function ModerationPostsPage() {
                   const res = await fetch("/api/moderation/sync/skool/posts", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    // Pull more history to avoid only getting the most recent admin announcements.
-                    body: JSON.stringify({ encryptedCookie: skoolSession.encryptedCookie, group: slug, limit: 80 }),
+                    // Pull more history to avoid only getting a biased subset of admin announcements.
+                    body: JSON.stringify({ encryptedCookie: skoolSession.encryptedCookie, group: slug, limit: 200, maxPages: 20, sort: "newest" }),
                   });
                   if (!res.ok) {
                     const j = await res.json().catch(() => null);
@@ -283,7 +284,7 @@ export default function ModerationPostsPage() {
                       throw new Error((j as any)?.error || `Sync failed (${res.status}).`);
                     }
                   } else {
-                    toast.error("Missing Skool session for this instance. Reconnect using Advanced cookie mode.");
+                    toast.error("Sessão Skool não encontrada nesta instância. Vai em “Connect instance” para reconectar.");
                   }
                 }
               } catch (e) {
@@ -509,7 +510,7 @@ export default function ModerationPostsPage() {
                         <div className="text-xs font-semibold text-zinc-500">
                           Signals: <span className="font-semibold text-zinc-700">{r.signals.join(", ")}</span>
                         </div>
-                      </div>
+                    </div>
                     </details>
                   </>
                 ) : null}

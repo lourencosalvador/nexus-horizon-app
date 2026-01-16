@@ -9,6 +9,27 @@ type Body = {
   jsonBody?: unknown;
 };
 
+const SKOOL_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36";
+
+function buildSkoolHeaders(baseUrl: string, cookie: string) {
+  const waf = getCookieValue(cookie, "aws-waf-token");
+  const referer = baseUrl.includes("api2.skool.com") ? "https://www.skool.com/" : `${baseUrl}/`;
+  return {
+    cookie,
+    ...(waf ? { "x-aws-waf-token": waf } : {}),
+    origin: "https://www.skool.com",
+    referer,
+    accept: "application/json, text/plain;q=0.9, */*;q=0.8",
+    "accept-language": "en-US,en;q=0.9,pt-PT;q=0.8,pt;q=0.7",
+    "user-agent": SKOOL_UA,
+    "sec-ch-ua": '"Chromium";v="123", "Not(A:Brand";v="24", "Google Chrome";v="123"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "x-requested-with": "XMLHttpRequest",
+  } as Record<string, string>;
+}
+
 function normalizeBaseUrl(input: string | undefined) {
   const v = (input ?? "").trim();
   if (!v) return "https://www.skool.com";
@@ -83,15 +104,7 @@ export async function POST(req: NextRequest) {
   const method = (body.method ?? "GET") as "GET" | "POST";
 
   try {
-    const waf = getCookieValue(cookie, "aws-waf-token");
-    const headers: Record<string, string> = {
-      cookie,
-      ...(waf ? { "x-aws-waf-token": waf } : {}),
-      origin: "https://www.skool.com",
-      referer: "https://www.skool.com/",
-      accept: "application/json, text/plain;q=0.9, */*;q=0.8",
-      "user-agent": "Mozilla/5.0 (Nexus; Skool Connector)",
-    };
+    const headers: Record<string, string> = buildSkoolHeaders(baseUrl, cookie);
 
     const bodyJson = body.jsonBody;
     const hasBody = method === "POST" && bodyJson !== undefined;

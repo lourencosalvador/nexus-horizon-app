@@ -23,6 +23,7 @@ import {
 import { getStoredUsage } from "@/shared/stores/usageStore";
 import { getSkoolApiPostsConfig } from "@/shared/stores/skoolApiPostsConfigStore";
 import { getSkoolSession } from "@/shared/stores/skoolSessionStore";
+import { extractSkoolGroupSlug } from "@/shared/utils/skool";
 
 type ModerationItem = {
   id: string;
@@ -420,9 +421,7 @@ export default function DashboardHome() {
                     className="cursor-pointer"
                     onClick={async () => {
                       try {
-                        const urlSlug = primary?.url?.includes("skool.com/")
-                          ? primary.url.split("skool.com/").pop()?.trim() ?? null
-                          : null;
+                        const urlSlug = extractSkoolGroupSlug(primary?.url);
                         const inferred =
                           !urlSlug && skoolSession?.encryptedCookie ? await inferGroupSlugFromSkool(skoolSession.encryptedCookie) : null;
                         const slug = (urlSlug || inferred || "").trim() || null;
@@ -439,8 +438,8 @@ export default function DashboardHome() {
                           const r = await fetch("/api/moderation/sync/skool/posts", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            // Pull more history to avoid only getting the most recent admin announcements.
-                            body: JSON.stringify({ encryptedCookie: skoolSession.encryptedCookie, group: slug, limit: 80 }),
+                            // Pull more history to avoid only getting a biased subset of admin announcements.
+                            body: JSON.stringify({ encryptedCookie: skoolSession.encryptedCookie, group: slug, limit: 200, maxPages: 20, sort: "newest" }),
                           });
                           if (!r.ok) {
                             const j = await r.json().catch(() => null);
@@ -518,7 +517,7 @@ export default function DashboardHome() {
                   const title = ((rawPost as any)?.metadata?.title ?? rawPost?.title ?? "").trim() || "Post";
                   const contentRaw = ((rawPost as any)?.metadata?.content ?? rawPost?.content ?? "").trim();
                   const excerpt = (contentRaw || "").slice(0, 160);
-                  const avSeed = seed + idx * 77;
+                const avSeed = seed + idx * 77;
                   const avatarSrc = avatarSrcFromRaw(it) || avatarUrlFromSeed(avSeed, author);
                   const tag = "needs review";
 

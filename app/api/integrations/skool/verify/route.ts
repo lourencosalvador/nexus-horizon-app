@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { decryptString } from "../_crypto";
 
+export const runtime = "nodejs";
+
 type VerifyBody = {
   baseUrl?: string;
   cookie?: string;

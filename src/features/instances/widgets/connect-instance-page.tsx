@@ -45,7 +45,6 @@ export default function ConnectInstancePage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [communityUrl, setCommunityUrl] = useState("");
   const [cookie, setCookie] = useState("");
   const [useAdvancedCookie, setUseAdvancedCookie] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -78,13 +77,18 @@ export default function ConnectInstancePage() {
     let encryptedCookie: string | null = null;
     let detectedGroup: { id: string; name: string; displayName?: string } | null = null;
     try {
-      if (useAdvancedCookie) {
-        const c = cookie.trim();
+      const cookieValue = cookie.trim();
+      const useCookie = useAdvancedCookie || cookieValue.length > 0;
+      if (useCookie) {
+        const c = cookieValue;
         if (c.length < 10) {
           toast.error("Paste your Skool Cookie header first.");
           cookieRef.current?.focus();
           setIsVerifying(false);
           return;
+        }
+        if (!useAdvancedCookie) {
+          toast.info("Using cookie header mode to connect.");
         }
         // Encrypt cookie server-side so the rest of the app can call Skool internal endpoints.
         const encRes = await fetch("/api/integrations/skool/session/create", {
@@ -137,8 +141,10 @@ export default function ConnectInstancePage() {
           return;
         }
         encryptedCookie = connectorData.encryptedCookie;
+      }
 
-        // Discover groups (best-effort) so we can auto-fill group_id and instance name.
+      // Discover groups (best-effort) so we can auto-name the instance without asking for URLs.
+      if (encryptedCookie) {
         try {
           const gRes = await fetch("/api/integrations/skool/groups/list", {
             method: "POST",
@@ -154,14 +160,18 @@ export default function ConnectInstancePage() {
           // ignore
         }
 
-        // Optional: best-effort verify using encrypted cookie to detect obvious failures.
-        const v = await fetch("/api/integrations/skool/verify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ baseUrl: b, encryptedCookie }),
-        });
-        const vd = (await v.json()) as { ok?: boolean; looksLoggedIn?: boolean | null };
-        looksLoggedIn = typeof vd.looksLoggedIn === "boolean" ? vd.looksLoggedIn : null;
+        // Best-effort verify using encrypted cookie (non-blocking if unknown).
+        try {
+          const v = await fetch("/api/integrations/skool/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ baseUrl: b, encryptedCookie }),
+          });
+          const vd = (await v.json()) as { ok?: boolean; looksLoggedIn?: boolean | null };
+          looksLoggedIn = typeof vd.looksLoggedIn === "boolean" ? vd.looksLoggedIn : looksLoggedIn;
+        } catch {
+          // ignore
+        }
       }
     } catch {
       toast.error("Could not verify session (network error).");
@@ -170,9 +180,7 @@ export default function ConnectInstancePage() {
     }
 
     const now = Date.now();
-    const provided = communityUrl.trim().replace(/\/+$/g, "");
-    const providedSlug = provided.includes("skool.com/") ? provided.split("skool.com/").pop()?.split("?")[0]?.trim() ?? "" : "";
-    const groupSlug = (providedSlug || detectedGroup?.name || "").trim();
+    const groupSlug = (detectedGroup?.name || "").trim();
     const url = groupSlug ? `https://www.skool.com/${groupSlug}` : "https://www.skool.com";
     const communityName = detectedGroup?.displayName ?? groupSlug ?? "Skool Community";
     const next: WorkspaceInstance = {
@@ -317,9 +325,9 @@ export default function ConnectInstancePage() {
               className={flashVerify ? "ring-2 ring-blue-600/35 ring-offset-2 ring-offset-white" : undefined}
             >
               <CardHeader>
-                <CardTitle className="text-base font-extrabold">Verify your Skool account</CardTitle>
+                <CardTitle className="text-base font-extrabold">Connect to Skool</CardTitle>
                 <CardDescription>
-                  Connect your Skool community to create your first instance. We do not store your password.
+                  Crie uma instância com apenas email e password. Não guardamos a password — só um cookie de sessão encriptado.
               </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -335,19 +343,6 @@ export default function ConnectInstancePage() {
                       <div className="text-sm font-semibold text-zinc-900">Skool Password</div>
                       <div className="mt-2">
                         <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="My Password" type="password" />
-                      </div>
-                    </div>
-                    <div className="sm:col-span-2">
-                      <div className="text-sm font-semibold text-zinc-900">Community URL (optional)</div>
-                      <div className="mt-2">
-                        <Input
-                          value={communityUrl}
-                          onChange={(e) => setCommunityUrl(e.target.value)}
-                          placeholder="https://www.skool.com/your-community-slug"
-                        />
-                      </div>
-                      <div className="mt-1 text-xs text-zinc-500">
-                        If we can't auto-detect your community, we'll use this URL to sync posts.
                       </div>
                     </div>
                   </div>
@@ -370,12 +365,19 @@ export default function ConnectInstancePage() {
                   </div>
                 )}
 
+                {!useAdvancedCookie ? (
+                  <div className="rounded-2xl border border-blue-200/60 bg-blue-50/70 px-4 py-3 text-xs font-semibold text-blue-900">
+                    Dica para Vercel: email+password pode ser bloqueado em deploy serverless. Se der erro, use o modo{" "}
+                    <span className="font-extrabold">Cookie (Advanced)</span>.
+                  </div>
+                ) : null}
+
                 <button
                   type="button"
                   className="cursor-pointer text-xs font-semibold text-zinc-600 hover:text-zinc-900"
                   onClick={() => setUseAdvancedCookie((v) => !v)}
                 >
-                  {useAdvancedCookie ? "Use email + password instead" : "Advanced: connect via Cookie header"}
+                  {useAdvancedCookie ? "Use email + password instead" : "Advanced (fallback): connect via Cookie header"}
                 </button>
 
                 <Button className="cursor-pointer w-full" onClick={() => void onVerify()} disabled={isVerifying}>

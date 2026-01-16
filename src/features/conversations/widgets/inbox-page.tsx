@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { cubicBezier, motion } from "framer-motion";
+import { AnimatePresence, cubicBezier, motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
 import {
   CheckCircle2,
@@ -10,6 +10,7 @@ import {
   CornerDownLeft,
   Filter,
   Inbox,
+  Maximize2,
   MessageSquareText,
   Mic,
   MoreVertical,
@@ -58,7 +59,10 @@ import {
   skoolMarkRead,
   skoolSendMessage,
   type SkoolChatChannel,
+  type SkoolChatMessage,
+  type SkoolChatMessagesResponse,
 } from "@/features/conversations/lib/skool-chat";
+import { runInboxAutomation } from "@/features/conversations/lib/inbox-automation-runner";
 
 type AuthUser = { email?: string; user_metadata?: { name?: string } };
 
@@ -463,6 +467,9 @@ export default function InboxPage() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [isSending, setIsSending] = useState(false);
+  const autoLockRef = useRef(false);
+  const [chatExpandedOpen, setChatExpandedOpen] = useState(false);
+  const chatExpandedRef = useRef<HTMLDivElement | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingStreamRef = useRef<MediaStream | null>(null);
   const recordingChunksRef = useRef<BlobPart[]>([]);
@@ -494,9 +501,9 @@ export default function InboxPage() {
     ),
     refetchInterval: isSkoolMode && selectedSkoolChannel?.id ? 15_000 : false,
     queryFn: async () => {
-      if (!skoolConnector || !selectedSkoolChannel) return { messages: [] as any[] };
+      if (!skoolConnector || !selectedSkoolChannel) return { messages: [] } satisfies SkoolChatMessagesResponse;
       const anchor = selectedSkoolChannel.last_message_id || selectedSkoolChannel.metadata?.last_read;
-      if (!anchor) return { messages: [] as any[] };
+      if (!anchor) return { messages: [] } satisfies SkoolChatMessagesResponse;
       return await skoolGetMessages(skoolConnector, selectedSkoolChannel.id, anchor, { before: 50, after: 50 });
     },
   });
@@ -653,17 +660,28 @@ export default function InboxPage() {
   useEffect(() => {
     if (!isSkoolMode) return;
     if (!selectedSkoolChannel) return;
-    const data = skoolMessagesQuery.data as any;
-    const list = Array.isArray(data?.messages) ? (data.messages as any[]) : [];
+    const data = skoolMessagesQuery.data as SkoolChatMessagesResponse | undefined;
+    const list: SkoolChatMessage[] = Array.isArray(data?.messages) ? data!.messages : [];
     const myId = skoolInferMyUserId(selectedSkoolChannel);
+    const otherId = selectedSkoolChannel.user?.id;
     const mapped: Message[] = list
-      .map((m: any) => {
+      .map((m: SkoolChatMessage) => {
         const ts = m?.created_at ? Date.parse(String(m.created_at)) : Date.now();
         const src = m?.metadata?.src ? String(m.metadata.src) : "";
+        const role =
+          otherId && src
+            ? src === otherId
+              ? ("member" as const)
+              : ("nexus" as const)
+            : myId && src
+            ? src === myId
+              ? ("nexus" as const)
+              : ("member" as const)
+            : ("member" as const);
         return {
           id: String(m.id ?? ""),
           conversationId: selectedSkoolChannel.id,
-          role: myId && src === myId ? ("nexus" as const) : ("member" as const),
+          role,
           text: String(m?.metadata?.content ?? ""),
           at: Number.isFinite(ts) ? ts : Date.now(),
           delivery: "delivered" as Delivery,
@@ -673,6 +691,130 @@ export default function InboxPage() {
     mapped.sort((a, b) => a.at - b.at);
     setMessagesMap((prev) => ({ ...prev, [selectedSkoolChannel.id]: mapped }));
   }, [isSkoolMode, selectedSkoolChannel?.id, skoolMessagesQuery.data]);
+
+  useEffect(() => {
+    // Inbox automation (Skool mode): welcome + choice routing (1-4), otherwise pending for human.
+    console.log("[Automation Debug] useEffect triggered", {
+      isSkoolMode,
+      hasConnector: !!skoolConnector,
+      activeInstanceId,
+      selectedChannelId: selectedSkoolChannel?.id,
+      threadLength: messagesMap[selectedSkoolChannel?.id ?? ""]?.length ?? 0,
+      composerLength: composer.trim().length,
+      autoLocked: autoLockRef.current,
+    });
+
+    if (!isSkoolMode) {
+      console.log("[Automation Debug] Skipping: not Skool mode");
+      return;
+    }
+    if (!skoolConnector) {
+      console.log("[Automation Debug] Skipping: no connector");
+      return;
+    }
+    if (!activeInstanceId) {
+      console.log("[Automation Debug] Skipping: no active instance");
+      return;
+    }
+    if (!selectedSkoolChannel) {
+      console.log("[Automation Debug] Skipping: no selected channel");
+      return;
+    }
+
+    const channelId = selectedSkoolChannel.id;
+    const thread = messagesMap[channelId] ?? [];
+    if (!thread.length) {
+      console.log("[Automation Debug] Skipping: empty thread");
+      return;
+    }
+
+    // Avoid running while the operator is typing a manual reply.
+    if (composer.trim().length > 0) {
+      console.log("[Automation Debug] Skipping: operator is typing");
+      return;
+    }
+
+    // Avoid overlapping runs.
+    if (autoLockRef.current) {
+      console.log("[Automation Debug] Skipping: autoLock is active");
+      return;
+    }
+
+    const memberName = skoolDisplayName(selectedSkoolChannel);
+
+    const run = async () => {
+      // Note: lock is set synchronously before scheduling run (StrictMode-safe).
+      try {
+        const sendMessage = async (text: string) => {
+          const content = text.trim();
+          if (!content) return;
+
+          const optimisticId = `skool_auto_${Date.now()}`;
+          const now = Date.now();
+          setMessagesMap((prev) => {
+            const existing = prev[channelId] ?? [];
+            return {
+              ...prev,
+              [channelId]: [
+                ...existing,
+                {
+                  id: optimisticId,
+                  conversationId: channelId,
+                  role: "nexus",
+                  text: content,
+                  at: now,
+                  delivery: "sent",
+                },
+              ],
+            };
+          });
+
+          try {
+            const created = await skoolSendMessage(skoolConnector, channelId, content, []);
+            setMessagesMap((prev) => {
+              const existing = prev[channelId] ?? [];
+              return {
+                ...prev,
+                [channelId]: existing.map((m) =>
+                  m.id === optimisticId ? { ...m, id: created.id, delivery: "delivered" as Delivery } : m
+                ),
+              };
+            });
+          } catch (e) {
+            console.error("[Automation] sendMessage ERROR", e);
+            toast.error(e instanceof Error ? e.message : "Failed to send automation reply.");
+            throw e;
+          }
+        };
+
+        await runInboxAutomation({
+          instanceId: activeInstanceId,
+          channelId,
+          thread,
+          memberName,
+          connector: skoolConnector,
+          onSendMessage: sendMessage,
+        });
+      } catch (error) {
+        console.error("[Automation] run() ERROR", error);
+      } finally {
+        autoLockRef.current = false;
+        // Refresh list/messages to keep UI in sync
+        void skoolChannelsQuery.refetch();
+        void skoolMessagesQuery.refetch();
+      }
+    };
+
+    autoLockRef.current = true;
+    void run();
+  }, [
+    isSkoolMode,
+    skoolConnector,
+    activeInstanceId,
+    selectedSkoolChannel?.id,
+    messagesMap[selectedSkoolChannel?.id ?? ""],
+    composer,
+  ]);
 
   useEffect(() => {
     if (!filtersMenuOpen) return;
@@ -691,6 +833,27 @@ export default function InboxPage() {
       window.removeEventListener("mousedown", onPointerDown);
     };
   }, [filtersMenuOpen]);
+
+  useEffect(() => {
+    if (!chatExpandedOpen) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setChatExpandedOpen(false);
+    };
+    const onPointerDown = (e: MouseEvent) => {
+      const el = chatExpandedRef.current;
+      if (!el) return;
+      if (e.target instanceof Node && !el.contains(e.target)) setChatExpandedOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("mousedown", onPointerDown);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("mousedown", onPointerDown);
+    };
+  }, [chatExpandedOpen]);
 
   useEffect(() => {
     if (!tagMenuForId) return;
@@ -986,7 +1149,7 @@ export default function InboxPage() {
 
       void (async () => {
         try {
-          const created = await skoolSendMessage(skoolConnector, channelId, text);
+          const created = await skoolSendMessage(skoolConnector, channelId, text, []);
           // Replace temp id with the real id (best-effort).
           setMessagesMap((prev) => {
             const thread = prev[channelId] ?? [];
@@ -1768,8 +1931,31 @@ export default function InboxPage() {
           </CardContent>
         </Card>
 
-        <Card className="lg:col-span-8 flex h-full min-h-0 flex-col overflow-visible">
-          <CardHeader className="shrink-0 border-b border-zinc-200/70">
+        <AnimatePresence>
+          {chatExpandedOpen && selected && (
+            <motion.button
+              type="button"
+              aria-label="Close expanded chat"
+              className="fixed inset-0 z-40 cursor-pointer bg-zinc-950/40 backdrop-blur-md"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18, ease }}
+              onClick={() => setChatExpandedOpen(false)}
+            />
+          )}
+        </AnimatePresence>
+
+        <Card
+          ref={chatExpandedRef}
+          className={cn(
+            "lg:col-span-8 flex h-full min-h-0 flex-col overflow-visible",
+            chatExpandedOpen && selected
+              ? "fixed inset-3 sm:inset-6 z-50 h-[calc(100vh-1.5rem)] sm:h-[calc(100vh-3rem)] w-[calc(100vw-1.5rem)] sm:w-[calc(100vw-3rem)] rounded-3xl shadow-[0_40px_120px_-40px_rgba(0,0,0,0.85)]"
+              : null
+          )}
+        >
+          <CardHeader className={cn("shrink-0 border-b border-zinc-200/70", chatExpandedOpen && selected ? "bg-white" : null)}>
             {!selected ? (
               <div>
                 <CardTitle>Conversation</CardTitle>
@@ -1926,6 +2112,15 @@ export default function InboxPage() {
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
+                  <button
+                    type="button"
+                    className="cursor-pointer rounded-xl border border-zinc-200 bg-white p-2 text-zinc-700 hover:bg-zinc-50"
+                    aria-label="Expand chat"
+                    title="Expand"
+                    onClick={() => setChatExpandedOpen(true)}
+                  >
+                    <Maximize2 size={16} />
+                  </button>
                   <div ref={moreRef} className="relative">
                     <button
                       type="button"

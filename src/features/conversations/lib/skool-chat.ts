@@ -69,7 +69,15 @@ async function internalRequest(session: SkoolConnectorSession, path: string, opt
     throw new Error(data.error || hint || "Skool request failed.");
   }
   if (typeof data.status === "number" && data.status >= 400) {
-    throw new Error(`Skool upstream error (${data.status}) for ${path}`);
+    const detail =
+      typeof data.json === "string"
+        ? data.json
+        : data.json
+        ? JSON.stringify(data.json)
+        : data.textPreview
+        ? data.textPreview.slice(0, 400)
+        : null;
+    throw new Error(`Skool upstream error (${data.status}) for ${path}${detail ? `: ${detail}` : ""}`);
   }
   return data;
 }
@@ -96,12 +104,40 @@ export async function skoolGetMessages(
   return (r.json as SkoolChatMessagesResponse | undefined) ?? { messages: [] };
 }
 
-export async function skoolSendMessage(session: SkoolConnectorSession, channelId: string, content: string): Promise<SkoolChatMessage> {
+export type SkoolAttachment = {
+  id?: string;
+  url?: string;
+  name?: string;
+  size?: number;
+  type?: string;
+};
+
+export async function skoolSendMessage(
+  session: SkoolConnectorSession,
+  channelId: string,
+  content: string,
+  attachments?: SkoolAttachment[]
+): Promise<SkoolChatMessage> {
   const r = await internalRequest(session, `/channels/${channelId}/messages?ct=wdm`, {
     method: "POST",
-    jsonBody: { content, attachments: [] },
+    jsonBody: { content, attachments: attachments ?? [] },
   });
   return (r.json as SkoolChatMessage) ?? { id: "unknown" };
+}
+
+/**
+ * Upload a file to Skool and return the attachment object.
+ * Note: This is a placeholder - actual Skool upload endpoint needs to be discovered.
+ * Common patterns: POST /upload, POST /files, or inline base64 in attachments.
+ */
+export async function skoolUploadFile(
+  session: SkoolConnectorSession,
+  file: { name: string; dataUrl: string; mime: string; size: number }
+): Promise<SkoolAttachment | null> {
+  // TODO: Discover actual Skool upload endpoint
+  // For now, returning null (attachments not yet supported)
+  console.warn("[Skool] File upload not yet implemented", { fileName: file.name });
+  return null;
 }
 
 export async function skoolMarkRead(session: SkoolConnectorSession, channelId: string, lastReadMessageId: string) {
