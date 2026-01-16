@@ -132,7 +132,7 @@ function CustomNode({ id, data, selected }: { id: string; data: NodeData; select
         value={data.label}
         onFocus={() => data.onSelect?.(id)}
         onChange={(e) => data.onLabelChange?.(id, e.target.value)}
-        placeholder="Escreve a mensagem..."
+        placeholder="Write your message…"
         rows={1}
         style={{
           width: "100%",
@@ -224,7 +224,7 @@ function EditableEdge(props: EdgeProps<Edge<EditableEdgeData>>) {
                 if (e.key === "Enter") commit();
                 if (e.key === "Escape") setEditing(false);
               }}
-              placeholder="Escreve a condição..."
+              placeholder="Write a condition…"
               style={{
                 width: 220,
                 maxWidth: 260,
@@ -240,7 +240,7 @@ function EditableEdge(props: EdgeProps<Edge<EditableEdgeData>>) {
           ) : (
             canEdit ? (
               <div
-                title="Duplo-clique para editar"
+                title="Double-click to edit"
                 style={{
                   fontSize: 12,
                   padding: "6px 10px",
@@ -256,7 +256,7 @@ function EditableEdge(props: EdgeProps<Edge<EditableEdgeData>>) {
                   textOverflow: "ellipsis",
                 }}
               >
-                {(data?.label ?? "").trim() || "Duplo-clique para escrever…"}
+                {(data?.label ?? "").trim() || "Double-click to write…"}
               </div>
             ) : null
           )}

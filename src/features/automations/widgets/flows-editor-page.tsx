@@ -174,13 +174,13 @@ export default function FlowsEditorPage() {
                   className="cursor-pointer"
                   onClick={() => {
                     if (!selectedNodeId) {
-                      toast.message("Seleciona um node para apagar.");
+                      toast.message("Select a node to delete.");
                       return;
                     }
                     const node = selected.nodes.find((n) => n.id === selectedNodeId);
                     if (!node) return;
                     if (node.kind === "trigger") {
-                      toast.error("O Trigger não pode ser apagado.");
+                      toast.error("The Trigger node can't be deleted.");
                       return;
                     }
                     deleteSelectedNode();

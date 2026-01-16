@@ -327,7 +327,7 @@ export default function ConnectInstancePage() {
               <CardHeader>
                 <CardTitle className="text-base font-extrabold">Connect to Skool</CardTitle>
                 <CardDescription>
-                  Crie uma instância com apenas email e password. Não guardamos a password — só um cookie de sessão encriptado.
+                  Create an instance using email + password or a Cookie header. We never store your password—only an encrypted session cookie.
               </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -367,7 +367,7 @@ export default function ConnectInstancePage() {
 
                 {!useAdvancedCookie ? (
                   <div className="rounded-2xl border border-blue-200/60 bg-blue-50/70 px-4 py-3 text-xs font-semibold text-blue-900">
-                    Dica para Vercel: email+password pode ser bloqueado em deploy serverless. Se der erro, use o modo{" "}
+                    Tip for Vercel: email+password may be blocked in serverless deployments. If it fails, use{" "}
                     <span className="font-extrabold">Cookie (Advanced)</span>.
                   </div>
                 ) : null}
