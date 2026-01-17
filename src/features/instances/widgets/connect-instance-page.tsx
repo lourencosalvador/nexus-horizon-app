@@ -13,7 +13,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/sha
 import { Input } from "@/shared/ui/input";
 import { Separator } from "@/shared/ui/separator";
 import { Switch } from "@/shared/ui/switch";
-import { Textarea } from "@/shared/ui/textarea";
+
 import logo from "@/app/assets/image/logo.png";
 import {
   getActiveInstanceId,
@@ -45,8 +45,7 @@ export default function ConnectInstancePage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [cookie, setCookie] = useState("");
-  const [useAdvancedCookie, setUseAdvancedCookie] = useState(false);
+  const [cookie] = useState("");
   const [isVerifying, setIsVerifying] = useState(false);
 
   const verifyRef = useRef<HTMLDivElement | null>(null);
@@ -78,7 +77,7 @@ export default function ConnectInstancePage() {
     let detectedGroup: { id: string; name: string; displayName?: string } | null = null;
     try {
       const cookieValue = cookie.trim();
-      const useCookie = useAdvancedCookie || cookieValue.length > 0;
+      const useCookie = cookieValue.length > 0;
       if (useCookie) {
         const c = cookieValue;
         if (c.length < 10) {
@@ -87,9 +86,7 @@ export default function ConnectInstancePage() {
           setIsVerifying(false);
           return;
         }
-        if (!useAdvancedCookie) {
-          toast.info("Using cookie header mode to connect.");
-        }
+        // Cookie UI is hidden for now; keep backend support as a fallback.
         // Encrypt cookie server-side so the rest of the app can call Skool internal endpoints.
         const encRes = await fetch("/api/integrations/skool/session/create", {
           method: "POST",
@@ -203,7 +200,7 @@ export default function ConnectInstancePage() {
       baseUrl: b,
       apiBaseUrl: "https://api2.skool.com",
       encryptedCookie: encryptedCookie ?? undefined,
-      cookie: useAdvancedCookie ? cookie.trim() : undefined,
+      cookie: undefined,
       createdAt: now,
     });
     if (looksLoggedIn === false) {
@@ -232,7 +229,7 @@ export default function ConnectInstancePage() {
         }}
       />
 
-      <header className="fixed inset-x-0 top-0 z-50 h-16 border-zinc-200 bg-white/70 backdrop-blur supports-[backdrop-filter]:bg-white/60">
+      <header className="fixed inset-x-0 top-0 z-50 h-16 border-zinc-200 bg-white/70 backdrop-blur supports-backdrop-filter:bg-white/60">
         <div className="mx-auto flex h-full max-w-5xl items-center justify-between px-6">
           <Link href="/" className="flex items-center relative">
             <Image src={logo} alt="Logo" width={78} height={78} priority />
@@ -331,7 +328,6 @@ export default function ConnectInstancePage() {
               </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                {!useAdvancedCookie ? (
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div>
                     <div className="text-sm font-semibold text-zinc-900">Skool Email</div>
@@ -346,39 +342,11 @@ export default function ConnectInstancePage() {
                       </div>
                     </div>
                   </div>
-                ) : (
-                  <div>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-semibold text-zinc-900">Cookie header (Advanced)</div>
-                      <span className="text-xs font-semibold text-zinc-500">DevTools → Network → Request Headers → Cookie</span>
-                    </div>
-                    <div className="mt-2">
-                      <Textarea
-                        ref={cookieRef}
-                        value={cookie}
-                        onChange={(e) => setCookie(e.target.value)}
-                        placeholder="Paste the full Cookie header value here…"
-                        className="min-h-[120px] font-mono text-[12px]"
-                        spellCheck={false}
-                      />
-                    </div>
-                  </div>
-                )}
 
-                {!useAdvancedCookie ? (
-                  <div className="rounded-2xl border border-blue-200/60 bg-blue-50/70 px-4 py-3 text-xs font-semibold text-blue-900">
-                    Tip for Vercel: email+password may be blocked in serverless deployments. If it fails, use{" "}
-                    <span className="font-extrabold">Cookie (Advanced)</span>.
-                  </div>
-                ) : null}
-
-                <button
-                  type="button"
-                  className="cursor-pointer text-xs font-semibold text-zinc-600 hover:text-zinc-900"
-                  onClick={() => setUseAdvancedCookie((v) => !v)}
-                >
-                  {useAdvancedCookie ? "Use email + password instead" : "Advanced (fallback): connect via Cookie header"}
-                </button>
+                <div className="rounded-2xl border border-blue-200/60 bg-blue-50/70 px-4 py-3 text-xs font-semibold text-blue-900">
+                  Tip: If login fails due to Skool security/WAF, you can still connect by pasting a Cookie header.
+                  (We can re-enable this UI if needed.)
+                </div>
 
                 <Button className="cursor-pointer w-full" onClick={() => void onVerify()} disabled={isVerifying}>
                   {isVerifying ? (

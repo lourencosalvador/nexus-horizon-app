@@ -39,8 +39,16 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
   const { Builder, By, until } = await import("selenium-webdriver");
   const chrome = (await import("selenium-webdriver/chrome")).default;
 
-  const hub = process.env.SELENIUM_HUB_URL || "http://selenium:4444/wd/hub";
+  const hubRaw = process.env.SELENIUM_HUB_URL || "http://selenium:4444/wd/hub";
+  function hubCandidates(raw: string): string[] {
+    const v = String(raw || "").trim().replace(/\/+$/g, "");
+    if (!v) return ["http://selenium:4444/wd/hub"];
+    if (v.endsWith("/wd/hub")) return [v, v.replace(/\/wd\/hub$/g, "")].filter(Boolean);
+    return [v, `${v}/wd/hub`];
+  }
+
   let driver: import("selenium-webdriver").WebDriver | null = null;
+  let lastErr: unknown = null;
   try {
     const options = new chrome.Options()
       .addArguments("--no-sandbox")
@@ -49,7 +57,40 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
       .addArguments("--window-size=1280,720")
       .addArguments("--headless=new");
 
-    driver = await new Builder().forBrowser("chrome").setChromeOptions(options).usingServer(hub).build();
+    // Preflight: detect which hub URL is alive by probing /status (Selenium 4) on the base.
+    // NOTE: Some deployments expose /wd/hub, some expose root. Render often returns 404 on "/" which is OK.
+    const candidates = hubCandidates(hubRaw);
+    const scored: Array<{ hub: string; ok: boolean; status?: number }> = [];
+
+    for (const hub of candidates) {
+      const base = hub.replace(/\/wd\/hub$/g, "");
+      try {
+        const r = await fetch(`${base}/status`, { method: "GET", cache: "no-store" });
+        scored.push({ hub, ok: r.ok, status: r.status });
+      } catch {
+        scored.push({ hub, ok: false });
+      }
+    }
+
+    // Prefer candidates that respond 200 on /status; otherwise just try in order.
+    const ordered = [...candidates].sort((a, b) => {
+      const sa = scored.find((x) => x.hub === a);
+      const sb = scored.find((x) => x.hub === b);
+      return Number(sb?.ok) - Number(sa?.ok);
+    });
+
+    // Some Selenium deployments expect /wd/hub, others expect root (/).
+    // Try both automatically so Render/standalone images work out-of-the-box.
+    for (const hub of ordered) {
+      try {
+        driver = await new Builder().forBrowser("chrome").setChromeOptions(options).usingServer(hub).build();
+        break;
+      } catch (e) {
+        lastErr = e;
+        driver = null;
+      }
+    }
+    if (!driver) throw lastErr ?? new Error("Could not connect to Selenium hub.");
     await driver.get(baseUrl);
 
     // Navigate to a likely login page if needed.
