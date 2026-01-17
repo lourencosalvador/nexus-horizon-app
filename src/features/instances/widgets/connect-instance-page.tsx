@@ -343,10 +343,10 @@ export default function ConnectInstancePage() {
                     </div>
                   </div>
 
-                <div className="rounded-2xl border border-blue-200/60 bg-blue-50/70 px-4 py-3 text-xs font-semibold text-blue-900">
+                {/* <div className="rounded-2xl border border-blue-200/60 bg-blue-50/70 px-4 py-3 text-xs font-semibold text-blue-900">
                   Tip: If login fails due to Skool security/WAF, you can still connect by pasting a Cookie header.
                   (We can re-enable this UI if needed.)
-                </div>
+                </div> */}
 
                 <Button className="cursor-pointer w-full" onClick={() => void onVerify()} disabled={isVerifying}>
                   {isVerifying ? (
