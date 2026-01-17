@@ -19,6 +19,19 @@ and forwards to `127.0.0.1:4444`, so the service is reachable on the public Rend
 - `https://<your-render-service>.onrender.com/wd/hub/status`
 - `https://<your-render-service>.onrender.com/ui/`
 
+## Cold start (Render free plan)
+
+On Render free instances, the service may **hibernate** after inactivity. When it wakes up, Selenium can take ~30–90s to become ready.
+During this time, Nexus may return a fast `503` like:
+
+- `Selenium hub is not ready yet (cold start/hibernation)...`
+
+To reduce this:
+
+- Use a paid Render plan (no hibernation), or
+- Keep it warm with a cron ping (recommended on Vercel):
+  - Add a cron that calls `GET /api/health/selenium-warmup` every 5 minutes (see `vercel.json`).
+
 ## Use from Nexus (Vercel or local)
 
 Set:

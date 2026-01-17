@@ -13,6 +13,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/sha
 import { Input } from "@/shared/ui/input";
 import { Separator } from "@/shared/ui/separator";
 import { Switch } from "@/shared/ui/switch";
+import { Textarea } from "@/shared/ui/textarea";
 
 import logo from "@/app/assets/image/logo.png";
 import {
@@ -26,6 +27,20 @@ import { getStoredUsage, setStoredUsage } from "@/shared/stores/usageStore";
 import { setSkoolSession } from "@/shared/stores/skoolSessionStore";
 
 const DEFAULT_SKOOL_BASE_URL = "https://www.skool.com";
+const CONNECT_TIMEOUT_MS = 40_000;
+const RETRY_BASE_DELAY_MS = 1800;
+const RETRY_MAX_DELAY_MS = 6500;
+
+class TimeoutError extends Error {
+  name = "TimeoutError";
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
@@ -33,6 +48,34 @@ function clamp(n: number, min: number, max: number) {
 
 function formatCompact(n: number) {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(n);
+}
+
+async function fetchJson<T>(input: RequestInfo | URL, init: RequestInit & { timeoutMs?: number } = {}): Promise<{
+  res: Response;
+  data: T;
+}> {
+  const { timeoutMs, ...rest } = init;
+
+  const controller = new AbortController();
+  const existingSignal = rest.signal as AbortSignal | undefined;
+  const onAbort = () => controller.abort();
+  if (existingSignal) existingSignal.addEventListener("abort", onAbort, { once: true });
+
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs ?? CONNECT_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(input, { ...rest, signal: controller.signal });
+  } catch (e) {
+    if (controller.signal.aborted) throw new TimeoutError("Request timed out.");
+    throw e;
+  } finally {
+    window.clearTimeout(timeout);
+    if (existingSignal) existingSignal.removeEventListener("abort", onAbort);
+  }
+
+  const data = (await res.json().catch(() => ({}))) as T;
+  return { res, data };
 }
 
 export default function ConnectInstancePage() {
@@ -45,7 +88,8 @@ export default function ConnectInstancePage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [cookie] = useState("");
+  const [cookie, setCookie] = useState("");
+  const [showAdvancedCookie, setShowAdvancedCookie] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
 
   const verifyRef = useRef<HTMLDivElement | null>(null);
@@ -72,6 +116,9 @@ export default function ConnectInstancePage() {
     if (isVerifying) return;
     setIsVerifying(true);
 
+    const startedAt = Date.now();
+    const timeLeft = () => Math.max(2500, CONNECT_TIMEOUT_MS - (Date.now() - startedAt));
+
     let looksLoggedIn: boolean | null = null;
     let encryptedCookie: string | null = null;
     let detectedGroup: { id: string; name: string; displayName?: string } | null = null;
@@ -88,12 +135,15 @@ export default function ConnectInstancePage() {
         }
         // Cookie UI is hidden for now; keep backend support as a fallback.
         // Encrypt cookie server-side so the rest of the app can call Skool internal endpoints.
-        const encRes = await fetch("/api/integrations/skool/session/create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ baseUrl: b, cookie: c }),
-        });
-        const encData = (await encRes.json()) as { ok?: boolean; encryptedCookie?: string; error?: string };
+        const { res: encRes, data: encData } = await fetchJson<{ ok?: boolean; encryptedCookie?: string; error?: string }>(
+          "/api/integrations/skool/session/create",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ baseUrl: b, cookie: c }),
+            timeoutMs: timeLeft(),
+          }
+        );
         if (!encRes.ok || encData.ok === false || !encData.encryptedCookie) {
           toast.error(encData.error || "Could not encrypt cookie.");
           setIsVerifying(false);
@@ -101,12 +151,15 @@ export default function ConnectInstancePage() {
         }
         encryptedCookie = encData.encryptedCookie;
 
-        const res = await fetch("/api/integrations/skool/verify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ baseUrl: b, encryptedCookie }),
-        });
-        const data = (await res.json()) as { ok?: boolean; looksLoggedIn?: boolean | null; error?: string };
+        const { res, data } = await fetchJson<{ ok?: boolean; looksLoggedIn?: boolean | null; error?: string }>(
+          "/api/integrations/skool/verify",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ baseUrl: b, encryptedCookie }),
+            timeoutMs: timeLeft(),
+          }
+        );
         if (!res.ok || data.ok === false) {
           toast.error(data.error || "Could not verify session.");
           setIsVerifying(false);
@@ -121,34 +174,88 @@ export default function ConnectInstancePage() {
           setIsVerifying(false);
           return;
         }
-        const connectorRes = await fetch("/api/integrations/skool/session/create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ baseUrl: b, email: e, password: p }),
-        });
+        let lastConnector: string | undefined;
+        let attempt = 0;
+        let coldStartToastShown = false;
+        while (true) {
+          attempt += 1;
+          try {
+            const { res: connectorRes, data: connectorData } = await fetchJson<{
+              ok?: boolean;
+              encryptedCookie?: string;
+              connector?: string;
+              error?: string;
+            }>("/api/integrations/skool/session/create", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ baseUrl: b, email: e, password: p }),
+              timeoutMs: timeLeft(),
+            });
 
-        const connectorData = (await connectorRes.json()) as { ok?: boolean; encryptedCookie?: string; connector?: string; error?: string };
-        if (!connectorRes.ok || connectorData.ok === false || !connectorData.encryptedCookie) {
-          toast.error(
-            `${connectorData.error || "Could not create Skool connector session."}${
-              connectorData.connector ? ` (connector: ${connectorData.connector})` : ""
-            }`
-          );
-          setIsVerifying(false);
-          return;
+            lastConnector = connectorData.connector;
+
+            if (connectorRes.ok && connectorData.ok !== false && connectorData.encryptedCookie) {
+              encryptedCookie = connectorData.encryptedCookie;
+              break;
+            }
+
+            const msg = connectorData.error || `Could not create Skool connector session (HTTP ${connectorRes.status}).`;
+            const retryable =
+              connectorRes.status === 503 ||
+              connectorRes.status === 502 ||
+              connectorRes.status === 504 ||
+              /selenium.*(not\s*ready|unreachable|wake|hibernat|cold\s*start)/i.test(msg);
+
+            if (!retryable || timeLeft() < 6000) {
+              toast.error(`${msg}${lastConnector ? ` (connector: ${lastConnector})` : ""}`);
+              setIsVerifying(false);
+              return;
+            }
+
+            if (!coldStartToastShown) {
+              coldStartToastShown = true;
+              toast.info("Connector is waking up (Render cold start). Retrying…");
+            }
+
+            const delay = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS + attempt * 450);
+            await sleep(Math.min(delay, timeLeft() - 2000));
+          } catch (err) {
+            const retryable = err instanceof TimeoutError;
+            if (!retryable || timeLeft() < 6000) {
+              if (err instanceof TimeoutError) {
+                toast.error(
+                  `Connection timed out after ~40s.${lastConnector ? ` (connector: ${lastConnector})` : ""} If the connector is sleeping, wait ~60s and try again.`
+                );
+              } else {
+                toast.error("Could not verify session (network error).");
+              }
+              setIsVerifying(false);
+              return;
+            }
+
+            if (!coldStartToastShown) {
+              coldStartToastShown = true;
+              toast.info("Connector is waking up (Render cold start). Retrying…");
+            }
+
+            const delay = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS + attempt * 450);
+            await sleep(Math.min(delay, timeLeft() - 2000));
+          }
         }
-        encryptedCookie = connectorData.encryptedCookie;
       }
 
       // Discover groups (best-effort) so we can auto-name the instance without asking for URLs.
       if (encryptedCookie) {
         try {
-          const gRes = await fetch("/api/integrations/skool/groups/list", {
+          const { res: gRes, data: gData } = await fetchJson<{
+            ok?: boolean;
+            groups?: Array<{ id: string; name: string; displayName?: string }>;
+          }>("/api/integrations/skool/groups/list", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ encryptedCookie }),
+            timeoutMs: timeLeft(),
           });
-          const gData = (await gRes.json()) as { ok?: boolean; groups?: Array<{ id: string; name: string; displayName?: string }> };
           const groups = Array.isArray(gData.groups) ? gData.groups : [];
           if (gRes.ok && gData.ok !== false && groups.length > 0) {
             detectedGroup = groups[0] ?? null;
@@ -159,19 +266,26 @@ export default function ConnectInstancePage() {
 
         // Best-effort verify using encrypted cookie (non-blocking if unknown).
         try {
-          const v = await fetch("/api/integrations/skool/verify", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ baseUrl: b, encryptedCookie }),
-          });
-          const vd = (await v.json()) as { ok?: boolean; looksLoggedIn?: boolean | null };
+          const { data: vd } = await fetchJson<{ ok?: boolean; looksLoggedIn?: boolean | null }>(
+            "/api/integrations/skool/verify",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ baseUrl: b, encryptedCookie }),
+              timeoutMs: timeLeft(),
+            }
+          );
           looksLoggedIn = typeof vd.looksLoggedIn === "boolean" ? vd.looksLoggedIn : looksLoggedIn;
         } catch {
           // ignore
         }
       }
-    } catch {
-      toast.error("Could not verify session (network error).");
+    } catch (e) {
+      if (e instanceof TimeoutError) {
+        toast.error("Connection timed out after ~40s. If the connector is sleeping, wait ~60s and try again.");
+      } else {
+        toast.error("Could not verify session (network error).");
+      }
       setIsVerifying(false);
       return;
     }
@@ -343,10 +457,45 @@ export default function ConnectInstancePage() {
                     </div>
                   </div>
 
-                {/* <div className="rounded-2xl border border-blue-200/60 bg-blue-50/70 px-4 py-3 text-xs font-semibold text-blue-900">
-                  Tip: If login fails due to Skool security/WAF, you can still connect by pasting a Cookie header.
-                  (We can re-enable this UI if needed.)
-                </div> */}
+                <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200 bg-white px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-zinc-900">Having trouble?</div>
+                    <div className="mt-0.5 text-xs text-zinc-500">
+                      If Skool blocks automated login (WAF/captcha), use a Cookie header instead.
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="cursor-pointer"
+                    onClick={() => {
+                      setShowAdvancedCookie((v) => !v);
+                      window.setTimeout(() => cookieRef.current?.focus(), 100);
+                    }}
+                  >
+                    {showAdvancedCookie ? "Hide advanced" : "Use cookie header"}
+                  </Button>
+                </div>
+
+                {showAdvancedCookie ? (
+                  <div className="space-y-2 rounded-2xl border border-zinc-200 bg-zinc-50/60 px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs font-semibold text-zinc-900">Cookie header (Advanced)</div>
+                      <div className="text-[11px] font-semibold text-zinc-500">We store only an encrypted session cookie.</div>
+                    </div>
+                    <Textarea
+                      ref={cookieRef}
+                      value={cookie}
+                      onChange={(e) => setCookie(e.target.value)}
+                      placeholder="Paste the full Cookie request header from your browser DevTools…"
+                      className="min-h-[92px] font-mono text-xs"
+                    />
+                    <div className="text-[11px] text-zinc-500">
+                      Tip: Open `www.skool.com` while logged in → DevTools → Network → any request → Headers → Request Headers → Copy <b>Cookie</b>.
+                    </div>
+                  </div>
+                ) : null}
 
                 <Button className="cursor-pointer w-full" onClick={() => void onVerify()} disabled={isVerifying}>
                   {isVerifying ? (

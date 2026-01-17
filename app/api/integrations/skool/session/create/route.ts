@@ -35,6 +35,25 @@ function mergeCookies(a: Array<{ name: string; value: string }>, b: Array<{ name
   return Array.from(map.entries()).map(([name, value]) => ({ name, value }));
 }
 
+class HttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: number } = {}) {
+  const { timeoutMs, ...rest } = init;
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs ?? 2500);
+  try {
+    return await fetch(url, { ...rest, signal: controller.signal, cache: "no-store" });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function runSeleniumLogin(baseUrl: string, email: string, password: string) {
   const { Builder, By, until } = await import("selenium-webdriver");
   const chrome = (await import("selenium-webdriver/chrome")).default;
@@ -55,7 +74,14 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
       .addArguments("--disable-dev-shm-usage")
       .addArguments("--disable-gpu")
       .addArguments("--window-size=1280,720")
-      .addArguments("--headless=new");
+      // Reduce automation fingerprints (best-effort; WAF may still trigger).
+      .addArguments("--disable-blink-features=AutomationControlled")
+      .addArguments("--lang=en-US")
+      .addArguments("--disable-infobars");
+
+    // Headless is more likely to be flagged; allow forcing headless via env if needed.
+    const forceHeadless = String(process.env.SKOOL_LOGIN_HEADLESS || "").toLowerCase() === "true";
+    if (forceHeadless) options.addArguments("--headless=new");
 
     // Preflight: detect which hub URL is alive by probing /status (Selenium 4) on the base.
     // NOTE: Some deployments expose /wd/hub, some expose root. Render often returns 404 on "/" which is OK.
@@ -65,11 +91,19 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
     for (const hub of candidates) {
       const base = hub.replace(/\/wd\/hub$/g, "");
       try {
-        const r = await fetch(`${base}/status`, { method: "GET", cache: "no-store" });
+        const r = await fetchWithTimeout(`${base}/status`, { method: "GET", timeoutMs: 2500 });
         scored.push({ hub, ok: r.ok, status: r.status });
       } catch {
         scored.push({ hub, ok: false });
       }
+    }
+
+    if (!scored.some((s) => s.ok)) {
+      // Render free services can hibernate. Fail fast so the UI can show a friendly retry message.
+      throw new HttpError(
+        503,
+        "Selenium hub is not ready yet (cold start/hibernation). Please wait ~60s and try again."
+      );
     }
 
     // Prefer candidates that respond 200 on /status; otherwise just try in order.
@@ -84,6 +118,8 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
     for (const hub of ordered) {
       try {
         driver = await new Builder().forBrowser("chrome").setChromeOptions(options).usingServer(hub).build();
+        // Keep the whole flow bounded; we want the UI to fail fast instead of waiting minutes.
+        await driver.manage().setTimeouts({ pageLoad: 20_000, script: 20_000, implicit: 0 }).catch(() => undefined);
         break;
       } catch (e) {
         lastErr = e;
@@ -109,12 +145,12 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
     // Heuristic selectors for login.
     const emailSel = 'input[type="email"], input[name="email"], input[autocomplete="email"]';
     const passSel = 'input[type="password"], input[name="password"], input[autocomplete="current-password"]';
-    await driver.wait(until.elementLocated(By.css(emailSel)), 25_000);
+    await driver.wait(until.elementLocated(By.css(emailSel)), 15_000);
     const emailEl = await driver.findElement(By.css(emailSel));
     await emailEl.clear();
     await emailEl.sendKeys(email);
 
-    await driver.wait(until.elementLocated(By.css(passSel)), 25_000);
+    await driver.wait(until.elementLocated(By.css(passSel)), 15_000);
     const passEl = await driver.findElement(By.css(passSel));
     await passEl.clear();
     await passEl.sendKeys(password);
@@ -217,13 +253,21 @@ export async function POST(req: NextRequest) {
 
   // IMPORTANT: We do not store the password. We only use it to establish a session and extract cookies.
   // This is a best-effort headless flow and may break if Skool changes their login UI.
-  const useSelenium = String(process.env.USE_SELENIUM_GRID || "").toLowerCase() === "true";
+  // Prefer Selenium Grid whenever SELENIUM_HUB_URL is set (common misconfig: USE_SELENIUM_GRID not set on Vercel).
+  const hasHubUrl = Boolean(String(process.env.SELENIUM_HUB_URL || "").trim());
+  const useSelenium = String(process.env.USE_SELENIUM_GRID || "").toLowerCase() === "true" || hasHubUrl;
   const connector = useSelenium ? "selenium" : "playwright";
 
   try {
     let cookieHeader = "";
     if (useSelenium) {
-      const r = await runSeleniumLogin(baseUrl, email, password);
+      // Bound end-to-end time for better UX (frontend has 40s max).
+      const r = await Promise.race([
+        runSeleniumLogin(baseUrl, email, password),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new HttpError(504, "Selenium login timed out. Please try again.")), 35_000)
+        ),
+      ]);
       cookieHeader = r.cookieHeader;
     } else {
       // Playwright is optional. If it's not installed (or browsers aren't available), we return a helpful error.
@@ -332,6 +376,9 @@ export async function POST(req: NextRequest) {
       note: "Password was not stored. Only an encrypted session token is returned.",
     });
   } catch (e) {
+    if (e instanceof HttpError) {
+      return NextResponse.json({ ok: false, connector, error: e.message }, { status: e.status });
+    }
     return NextResponse.json(
       { ok: false, connector, error: e instanceof Error ? e.message : "Session creation failed." },
       { status: 500 }

@@ -1,0 +1,9 @@
+{
+  "crons": [
+    {
+      "path": "/api/health/selenium-warmup",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
+
