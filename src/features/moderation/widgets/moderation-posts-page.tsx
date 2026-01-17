@@ -253,7 +253,6 @@ export default function ModerationPostsPage() {
                     return;
                   }
 
-                  // Persist URL so future syncs don't need inference.
                   if (activeInstanceId) {
                     const instances = getStoredInstances();
                     const nextUrl = `https://www.skool.com/${slug}`;
