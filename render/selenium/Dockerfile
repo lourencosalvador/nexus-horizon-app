@@ -9,7 +9,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends socat \
   && rm -rf /var/lib/apt/lists/*
 
-COPY render/selenium/render-port-proxy.conf /etc/supervisor/conf.d/render-port-proxy.conf
+COPY render-port-proxy.conf /etc/supervisor/conf.d/render-port-proxy.conf
 
 USER seluser
 
