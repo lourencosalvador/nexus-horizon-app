@@ -91,6 +91,10 @@ export default function ConnectInstancePage() {
   const [cookie, setCookie] = useState("");
   const [showAdvancedCookie, setShowAdvancedCookie] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [blockedByWaf, setBlockedByWaf] = useState<{ message: string; connector?: string } | null>(null);
+  const [interactive, setInteractive] = useState<{ sessionId: string; vncUrl?: string | null } | null>(null);
+  const [isInteractiveStarting, setIsInteractiveStarting] = useState(false);
+  const [isInteractiveFinishing, setIsInteractiveFinishing] = useState(false);
 
   const verifyRef = useRef<HTMLDivElement | null>(null);
   const instancesRef = useRef<HTMLDivElement | null>(null);
@@ -111,17 +115,93 @@ export default function ConnectInstancePage() {
 
   const canGoDashboard = Boolean(activeId);
 
+  const completeWithEncryptedCookie = async (encryptedCookie: string) => {
+    const b = DEFAULT_SKOOL_BASE_URL;
+    let looksLoggedIn: boolean | null = null;
+    let detectedGroup: { id: string; name: string; displayName?: string } | null = null;
+
+    // Discover groups (best-effort) so we can auto-name the instance without asking for URLs.
+    try {
+      const { res: gRes, data: gData } = await fetchJson<{
+        ok?: boolean;
+        groups?: Array<{ id: string; name: string; displayName?: string }>;
+      }>("/api/integrations/skool/groups/list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ encryptedCookie }),
+        timeoutMs: CONNECT_TIMEOUT_MS,
+      });
+      const groups = Array.isArray(gData.groups) ? gData.groups : [];
+      if (gRes.ok && gData.ok !== false && groups.length > 0) {
+        detectedGroup = groups[0] ?? null;
+      }
+    } catch {
+      // ignore
+    }
+
+    // Best-effort verify using encrypted cookie (non-blocking if unknown).
+    try {
+      const { data: vd } = await fetchJson<{ ok?: boolean; looksLoggedIn?: boolean | null }>(
+        "/api/integrations/skool/verify",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ baseUrl: b, encryptedCookie }),
+          timeoutMs: CONNECT_TIMEOUT_MS,
+        }
+      );
+      looksLoggedIn = typeof vd.looksLoggedIn === "boolean" ? vd.looksLoggedIn : looksLoggedIn;
+    } catch {
+      // ignore
+    }
+
+    const now = Date.now();
+    const groupSlug = (detectedGroup?.name || "").trim();
+    const url = groupSlug ? `https://www.skool.com/${groupSlug}` : "https://www.skool.com";
+    const communityName = detectedGroup?.displayName ?? groupSlug ?? "Skool Community";
+    const next: WorkspaceInstance = {
+      id: `inst_${now}`,
+      name: communityName,
+      url,
+      status: "running",
+      createdAt: now,
+      testMode,
+    };
+
+    setInstances((prev) => {
+      const updated = [next, ...prev];
+      setStoredInstances(updated);
+      return updated;
+    });
+    setStoredUsage(420);
+    setUsage(420);
+    setSkoolSession(next.id, {
+      baseUrl: b,
+      apiBaseUrl: "https://api2.skool.com",
+      encryptedCookie: encryptedCookie ?? undefined,
+      cookie: undefined,
+      createdAt: now,
+    });
+    if (looksLoggedIn === false) {
+      toast.warning("Session saved, but it doesn’t look logged in. We’ll validate internal endpoints next.");
+    } else {
+      toast.success("Instance connected. Select it to continue.");
+    }
+    window.setTimeout(() => {
+      instancesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  };
+
   const onVerify = async () => {
     const b = DEFAULT_SKOOL_BASE_URL;
     if (isVerifying) return;
     setIsVerifying(true);
+    setBlockedByWaf(null);
 
     const startedAt = Date.now();
     const timeLeft = () => Math.max(2500, CONNECT_TIMEOUT_MS - (Date.now() - startedAt));
 
-    let looksLoggedIn: boolean | null = null;
     let encryptedCookie: string | null = null;
-    let detectedGroup: { id: string; name: string; displayName?: string } | null = null;
     try {
       const cookieValue = cookie.trim();
       const useCookie = cookieValue.length > 0;
@@ -165,7 +245,7 @@ export default function ConnectInstancePage() {
           setIsVerifying(false);
           return;
         }
-        looksLoggedIn = typeof data.looksLoggedIn === "boolean" ? data.looksLoggedIn : null;
+        void data;
       } else {
         const e = email.trim();
         const p = password;
@@ -207,7 +287,12 @@ export default function ConnectInstancePage() {
               /selenium.*(not\s*ready|unreachable|wake|hibernat|cold\s*start)/i.test(msg);
 
             if (!retryable || timeLeft() < 6000) {
+              if (/auth_token|waf|captcha/i.test(msg)) {
+                setBlockedByWaf({ message: msg, connector: connectorData.connector });
+                toast.error("Skool blocked automated login. Use the quick verification step below.");
+              } else {
               toast.error(`${msg}${lastConnector ? ` (connector: ${lastConnector})` : ""}`);
+              }
               setIsVerifying(false);
               return;
             }
@@ -244,42 +329,6 @@ export default function ConnectInstancePage() {
         }
       }
 
-      // Discover groups (best-effort) so we can auto-name the instance without asking for URLs.
-      if (encryptedCookie) {
-        try {
-          const { res: gRes, data: gData } = await fetchJson<{
-            ok?: boolean;
-            groups?: Array<{ id: string; name: string; displayName?: string }>;
-          }>("/api/integrations/skool/groups/list", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ encryptedCookie }),
-            timeoutMs: timeLeft(),
-          });
-          const groups = Array.isArray(gData.groups) ? gData.groups : [];
-          if (gRes.ok && gData.ok !== false && groups.length > 0) {
-            detectedGroup = groups[0] ?? null;
-          }
-        } catch {
-          // ignore
-        }
-
-        // Best-effort verify using encrypted cookie (non-blocking if unknown).
-        try {
-          const { data: vd } = await fetchJson<{ ok?: boolean; looksLoggedIn?: boolean | null }>(
-            "/api/integrations/skool/verify",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ baseUrl: b, encryptedCookie }),
-              timeoutMs: timeLeft(),
-            }
-          );
-          looksLoggedIn = typeof vd.looksLoggedIn === "boolean" ? vd.looksLoggedIn : looksLoggedIn;
-        } catch {
-          // ignore
-        }
-      }
     } catch (e) {
       if (e instanceof TimeoutError) {
         toast.error("Connection timed out after ~40s. If the connector is sleeping, wait ~60s and try again.");
@@ -289,43 +338,73 @@ export default function ConnectInstancePage() {
       setIsVerifying(false);
       return;
     }
-
-    const now = Date.now();
-    const groupSlug = (detectedGroup?.name || "").trim();
-    const url = groupSlug ? `https://www.skool.com/${groupSlug}` : "https://www.skool.com";
-    const communityName = detectedGroup?.displayName ?? groupSlug ?? "Skool Community";
-    const next: WorkspaceInstance = {
-      id: `inst_${now}`,
-      name: communityName,
-      url,
-      status: "running",
-      createdAt: now,
-      testMode,
-    };
-
-    setInstances((prev) => {
-      const updated = [next, ...prev];
-      setStoredInstances(updated);
-      return updated;
-    });
-    setStoredUsage(420);
-    setUsage(420);
-    setSkoolSession(next.id, {
-      baseUrl: b,
-      apiBaseUrl: "https://api2.skool.com",
-      encryptedCookie: encryptedCookie ?? undefined,
-      cookie: undefined,
-      createdAt: now,
-    });
-    if (looksLoggedIn === false) {
-      toast.warning("Session saved, but it doesn’t look logged in. We’ll validate internal endpoints next.");
-    } else {
-      toast.success("Instance connected. Select it to continue.");
-    }
     setIsVerifying(false);
-    window.setTimeout(() => {
-      instancesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 50);
+    if (!encryptedCookie) {
+      toast.error("Could not create session.");
+      return;
+    }
+    await completeWithEncryptedCookie(encryptedCookie);
+  };
+
+  const startInteractive = async () => {
+    if (isInteractiveStarting) return;
+    setIsInteractiveStarting(true);
+    try {
+      const { res, data } = await fetchJson<{
+        ok?: boolean;
+        sessionId?: string;
+        vncUrl?: string | null;
+        error?: string;
+      }>("/api/integrations/skool/session/interactive/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ baseUrl: DEFAULT_SKOOL_BASE_URL }),
+        timeoutMs: 20_000,
+      });
+      if (!res.ok || data.ok === false || !data.sessionId) {
+        toast.error(data.error || "Could not start verification session.");
+        return;
+      }
+      setInteractive({ sessionId: data.sessionId, vncUrl: data.vncUrl });
+      toast.success("Verification session started. Complete login in the secure window, then click “Finish verification”.");
+      if (data.vncUrl) {
+        window.open(data.vncUrl, "_blank", "noopener,noreferrer");
+      } else {
+        toast.info("SELENIUM_VNC_URL is not configured. Ask the admin to expose /vnc on the Selenium service.");
+      }
+    } catch (e) {
+      toast.error(e instanceof TimeoutError ? "Timed out starting verification session." : "Network error starting verification.");
+    } finally {
+      setIsInteractiveStarting(false);
+    }
+  };
+
+  const finishInteractive = async () => {
+    if (!interactive?.sessionId || isInteractiveFinishing) return;
+    setIsInteractiveFinishing(true);
+    try {
+      const { res, data } = await fetchJson<{
+        ok?: boolean;
+        encryptedCookie?: string;
+        error?: string;
+      }>("/api/integrations/skool/session/interactive/finish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: interactive.sessionId, baseUrl: DEFAULT_SKOOL_BASE_URL }),
+        timeoutMs: 25_000,
+      });
+      if (!res.ok || data.ok === false || !data.encryptedCookie) {
+        toast.error(data.error || "Verification not finished yet. Make sure you logged in, then try again.");
+        return;
+      }
+      setInteractive(null);
+      setBlockedByWaf(null);
+      await completeWithEncryptedCookie(data.encryptedCookie);
+    } catch (e) {
+      toast.error(e instanceof TimeoutError ? "Timed out finishing verification." : "Network error finishing verification.");
+    } finally {
+      setIsInteractiveFinishing(false);
+    }
   };
 
   const selectInstance = (id: string) => {
@@ -477,6 +556,60 @@ export default function ConnectInstancePage() {
                     {showAdvancedCookie ? "Hide advanced" : "Use cookie header"}
                   </Button>
                 </div>
+
+                {blockedByWaf ? (
+                  <div className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-3">
+                    <div className="text-xs font-semibold text-amber-900">Quick verification required</div>
+                    <div className="text-xs text-amber-900/80">
+                      Skool blocked automated login (captcha/WAF). Open the secure verification window, complete the captcha/login, then finish
+                      verification here.
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="cursor-pointer border-amber-300 bg-white"
+                        onClick={() => void startInteractive()}
+                        disabled={isInteractiveStarting}
+                      >
+                        {isInteractiveStarting ? (
+                          <>
+                            <Loader2 size={14} className="animate-spin" />
+                            Starting…
+                          </>
+                        ) : (
+                          "Open verification window"
+                        )}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="cursor-pointer"
+                        onClick={() => void finishInteractive()}
+                        disabled={!interactive?.sessionId || isInteractiveFinishing}
+                      >
+                        {isInteractiveFinishing ? (
+                          <>
+                            <Loader2 size={14} className="animate-spin" />
+                            Finishing…
+                          </>
+                        ) : (
+                          "Finish verification"
+                        )}
+                      </Button>
+                      {interactive?.sessionId ? (
+                        <span className="text-[11px] font-semibold text-amber-900/70">
+                          Session: {interactive.sessionId.slice(0, 8)}…
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="text-[11px] text-amber-900/70">
+                      {blockedByWaf.message}
+                      {blockedByWaf.connector ? ` (connector: ${blockedByWaf.connector})` : ""}
+                    </div>
+                  </div>
+                ) : null}
 
                 {showAdvancedCookie ? (
                   <div className="space-y-2 rounded-2xl border border-zinc-200 bg-zinc-50/60 px-4 py-3">

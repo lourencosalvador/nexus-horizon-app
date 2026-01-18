@@ -1,0 +1,40 @@
+server {
+  listen ${PORT};
+  server_name _;
+
+  # Optional token gate for /vnc/ (if SELENIUM_VNC_TOKEN is set).
+  # - If empty -> allow
+  # - If set  -> require ?token=<value>
+  set $expected_token "${SELENIUM_VNC_TOKEN}";
+  set $request_token  "${arg_token}";
+
+  # Selenium (WebDriver + UI)
+  location / {
+    proxy_pass http://127.0.0.1:4444;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  # noVNC UI + websocket proxy
+  location ^~ /vnc/ {
+    if ($expected_token != "") {
+      if ($request_token != $expected_token) { return 403; }
+    }
+
+    proxy_pass http://127.0.0.1:7900/;
+    proxy_http_version 1.1;
+
+    # websocket
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+
