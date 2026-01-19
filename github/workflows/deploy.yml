@@ -1,0 +1,59 @@
+name: Deploy Nexus to Vultr
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        env:
+          NEXUS_SKOOL_ENCRYPTION_KEY: ${{ secrets.NEXUS_SKOOL_ENCRYPTION_KEY }}
+          NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${{ secrets.NEXT_PUBLIC_GOOGLE_CLIENT_ID }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          UNSPLASH_SECRET_KEY: ${{ secrets.UNSPLASH_SECRET_KEY }}
+          UNSPLASH_APP_ID: ${{ secrets.UNSPLASH_APP_ID }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SELENIUM_HUB_URL: ${{ secrets.SELENIUM_HUB_URL }}
+          USE_SELENIUM_GRID: ${{ secrets.USE_SELENIUM_GRID }}
+          ENABLE_SKOOL_PASSWORD_LOGIN: ${{ secrets.ENABLE_SKOOL_PASSWORD_LOGIN }}
+          SELENIUM_REMOTE_URL: ${{ secrets.SELENIUM_REMOTE_URL }}
+        with:
+          host: ${{ secrets.VULTR_HOST }}
+          username: root
+          key: ${{ secrets.VULTR_SSH_PRIVATE_KEY }}
+          script: |
+            cd /app/nexus-horizon-app
+            
+            # Cria o .env com todas as variáveis
+            cat > .env << EOF
+            NEXUS_SKOOL_ENCRYPTION_KEY=$NEXUS_SKOOL_ENCRYPTION_KEY
+            NEXT_PUBLIC_GOOGLE_CLIENT_ID=$NEXT_PUBLIC_GOOGLE_CLIENT_ID
+            UNSPLASH_ACCESS_KEY=$UNSPLASH_ACCESS_KEY
+            UNSPLASH_SECRET_KEY=$UNSPLASH_SECRET_KEY
+            UNSPLASH_APP_ID=$UNSPLASH_APP_ID
+            NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+            SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY
+            OPENAI_API_KEY=$OPENAI_API_KEY
+            SELENIUM_HUB_URL=$SELENIUM_HUB_URL
+            USE_SELENIUM_GRID=$USE_SELENIUM_GRID
+            ENABLE_SKOOL_PASSWORD_LOGIN=$ENABLE_SKOOL_PASSWORD_LOGIN
+            SELENIUM_REMOTE_URL=$SELENIUM_REMOTE_URL
+            EOF
+            
+            git pull origin main
+            docker compose down
+            docker compose up -d --build
+            docker system prune -f
