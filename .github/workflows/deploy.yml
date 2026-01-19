@@ -25,6 +25,11 @@ jobs:
             set -euo pipefail
             cd /app/nexus-horizon-app
             git pull origin main
+            if [ ! -f .env ]; then
+              echo "ERROR: missing /app/nexus-horizon-app/.env"
+              echo "Create it on the server (production env vars) and re-run the workflow."
+              exit 1
+            fi
             docker compose down
             docker compose up -d --build
             docker system prune -f
