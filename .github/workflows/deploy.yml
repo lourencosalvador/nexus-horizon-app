@@ -1,0 +1,31 @@
+name: Deploy to Vultr (Docker Compose)
+
+on:
+  push:
+    branches: ["main"]
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VULTR_HOST }}
+          username: ${{ secrets.VULTR_USER || 'root' }}
+          key: ${{ secrets.VULTR_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.VULTR_PORT || 22 }}
+          script_stop: true
+          command_timeout: 30m
+          script: |
+            set -euo pipefail
+            cd /app/nexus-horizon-app
+            git pull origin main
+            docker compose down
+            docker compose up -d --build
+            docker system prune -f
+

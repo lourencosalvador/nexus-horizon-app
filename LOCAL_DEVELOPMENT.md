@@ -46,7 +46,7 @@ Isso evita Playwright/Selenium e reduz bastante o uso de RAM.
 
 ---
 
-# Desenvolvimento local (com Selenium via Docker) — “igual Vercel”
+# Desenvolvimento local (com Selenium via Docker) — “igual produção”
 
 Se o teu objetivo é **testar login por email + password** (sem pedir cookie ao user), usa o `docker-compose.yml` do repo,
 que sobe um **Selenium Standalone Chrome** e a app com `USE_SELENIUM_GRID=true`.

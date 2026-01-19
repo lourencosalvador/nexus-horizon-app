@@ -183,8 +183,8 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
     const apiCookies = await driver.manage().getCookies();
 
     const merged = mergeCookies(
-      webCookies.map((c: any) => ({ name: c.name, value: c.value })),
-      apiCookies.map((c: any) => ({ name: c.name, value: c.value }))
+      webCookies.map((c: { name: string; value: string }) => ({ name: c.name, value: c.value })),
+      apiCookies.map((c: { name: string; value: string }) => ({ name: c.name, value: c.value }))
     );
     const cookieHeader = buildCookieHeader(merged);
     return { cookieHeader };
@@ -243,7 +243,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, success: false, error: "Invalid email or password." }, { status: 400 });
   }
 
-  // IMPORTANT: In Vercel/serverless, browser automation is often blocked or heavyweight.
+  // IMPORTANT: In serverless environments, browser automation is often blocked or heavyweight.
   // Keep email/password as an optional connector behind an explicit flag.
   const allowPasswordLogin = String(process.env.ENABLE_SKOOL_PASSWORD_LOGIN || "").toLowerCase() === "true";
   if (!allowPasswordLogin) {
@@ -280,9 +280,11 @@ export async function POST(req: NextRequest) {
       cookieHeader = r.cookieHeader;
     } else {
       // Playwright is optional. If it's not installed (or browsers aren't available), we return a helpful error.
-      let chromium: any;
+      let chromium: { launch: (opts: { headless: boolean }) => Promise<unknown> };
       try {
-        const pw = (await import("playwright")) as any;
+        const pw = (await import("playwright")) as unknown as {
+          chromium: { launch: (opts: { headless: boolean }) => Promise<unknown> };
+        };
         chromium = pw.chromium;
       } catch {
         return NextResponse.json(
@@ -297,7 +299,31 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const browser = await chromium.launch({ headless: true });
+      type PWCookie = { name: string; value: string };
+      type PWElementHandle = { click: () => Promise<void> };
+      type PWKeyboard = { press: (key: string) => Promise<void> };
+      type PWPage = {
+        goto: (url: string, opts: { waitUntil: "domcontentloaded" | "networkidle"; timeout: number }) => Promise<void>;
+        url: () => string;
+        waitForSelector: (selector: string, opts: { timeout: number }) => Promise<void>;
+        fill: (selector: string, value: string) => Promise<void>;
+        $: (selector: string) => Promise<PWElementHandle | null>;
+        waitForLoadState: (state: "networkidle", opts: { timeout: number }) => Promise<void>;
+        focus: (selector: string) => Promise<void>;
+        keyboard: PWKeyboard;
+        waitForTimeout: (ms: number) => Promise<void>;
+      };
+      type PWContext = {
+        newPage: () => Promise<PWPage>;
+        cookies: () => Promise<PWCookie[]>;
+        close: () => Promise<void>;
+      };
+      type PWBrowser = {
+        newContext: (opts: { userAgent: string }) => Promise<PWContext>;
+        close: () => Promise<void>;
+      };
+
+      const browser = (await chromium.launch({ headless: true })) as unknown as PWBrowser;
       const context = await browser.newContext({
         userAgent: "Mozilla/5.0 (Nexus; Skool Connector)",
       });
@@ -371,7 +397,7 @@ export async function POST(req: NextRequest) {
           success: false,
           connector,
           error:
-            "Login did not yield an auth_token cookie. Skool may have blocked automation (WAF/captcha) or the login flow changed. Try Advanced cookie mode.",
+            "Login did not yield an auth_token cookie. Skool may have blocked automation (WAF/captcha) or the login flow changed. Try the quick verification step.",
         },
         { status: 401 }
       );

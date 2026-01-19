@@ -35,10 +35,10 @@ During this time, Nexus may return a fast `503` like:
 To reduce this:
 
 - Use a paid Render plan (no hibernation), or
-- Keep it warm with a cron ping (recommended on Vercel):
-  - Add a cron that calls `GET /api/health/selenium-warmup` every 5 minutes (see `vercel.json`).
+- Keep it warm with a cron ping:
+  - Call `GET /api/health/selenium-warmup` every 5 minutes (use any external monitor/cron).
 
-## Use from Nexus (Vercel or local)
+## Use from Nexus (any hosting)
 
 Set:
 
