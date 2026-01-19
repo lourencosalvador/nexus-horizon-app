@@ -46,3 +46,4 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 ## Deploy
 
 This repo is deployed to a Vultr server via Docker Compose + GitHub Actions (SSH).
+# Limpeza cache + teste standalone
