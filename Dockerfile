@@ -1,24 +1,22 @@
-FROM node:20-alpine AS base
-
-# Instala dependências
-FROM base AS deps
+# Etapa 1: Builder
+FROM node:20-alpine AS builder
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package*.json ./
 RUN npm ci
-
-# Builda a app
-FROM base AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
-# Roda a app
-FROM base AS runner
+# Etapa 2: Runner (standalone)
+FROM node:20-alpine AS runner
 WORKDIR /app
+
 ENV NODE_ENV=production
+
+# Copia apenas o necessário do standalone
 COPY --from=builder /app/next.config.mjs ./
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+
+# CMD do standalone
 CMD ["node", "server.js"]
