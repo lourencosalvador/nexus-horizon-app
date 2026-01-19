@@ -21,15 +21,14 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3001:3000"  # ou 3000:3000 se preferires
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production  # muda para production no deploy
       - USE_SELENIUM_GRID=true
       - SELENIUM_REMOTE_URL=http://selenium:4444/wd/hub
-      # as outras envs vêm do .env criado pelo Actions
+      # as outras envs vêm do .env
     depends_on:
       selenium:
         condition: service_healthy
-    volumes:
-      - .:/app
-      - /app/node_modules
     restart: unless-stopped
