@@ -149,7 +149,7 @@ export default function ContactUsPage() {
               type="submit"
               className="mt-12 inline-flex items-center gap-3 rounded-full bg-[#0047FF] px-10 py-4 text-sm font-bold text-white transition-all hover:bg-blue-700 hover:shadow-xl active:scale-95 group"
             >
-              Leave us a Message 
+              Leave us a Messag
               <ArrowRight size={18} className="transition-transform group-hover:translate-x-1" />
             </button>
           </form>
