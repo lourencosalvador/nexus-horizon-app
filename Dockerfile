@@ -13,7 +13,6 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # Copia apenas o necessário do standalone
-COPY --from=builder /app/next.config.mjs ./
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
