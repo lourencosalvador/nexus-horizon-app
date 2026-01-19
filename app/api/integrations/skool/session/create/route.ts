@@ -58,7 +58,9 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
   const { Builder, By, until } = await import("selenium-webdriver");
   const chrome = (await import("selenium-webdriver/chrome")).default;
 
-  const hubRaw = process.env.SELENIUM_HUB_URL || "http://selenium:4444/wd/hub";
+  // Prefer explicit remote URL (Vultr always-on selenium), fallback to existing hub URL.
+  // Example: http://155.138.200.11:4444/wd/hub
+  const hubRaw = process.env.SELENIUM_REMOTE_URL || process.env.SELENIUM_HUB_URL || "http://selenium:4444/wd/hub";
   function hubCandidates(raw: string): string[] {
     const v = String(raw || "").trim().replace(/\/+$/g, "");
     if (!v) return ["http://selenium:4444/wd/hub"];
@@ -74,14 +76,14 @@ async function runSeleniumLogin(baseUrl: string, email: string, password: string
       .addArguments("--disable-dev-shm-usage")
       .addArguments("--disable-gpu")
       .addArguments("--window-size=1280,720")
+      // Required per spec
+      .addArguments("--headless=new")
       // Reduce automation fingerprints (best-effort; WAF may still trigger).
       .addArguments("--disable-blink-features=AutomationControlled")
       .addArguments("--lang=en-US")
       .addArguments("--disable-infobars");
 
-    // Headless is more likely to be flagged; allow forcing headless via env if needed.
-    const forceHeadless = String(process.env.SKOOL_LOGIN_HEADLESS || "").toLowerCase() === "true";
-    if (forceHeadless) options.addArguments("--headless=new");
+    // We intentionally always quit the remote driver in finally.
 
     // Preflight: detect which hub URL is alive by probing /status (Selenium 4) on the base.
     // NOTE: Some deployments expose /wd/hub, some expose root. Render often returns 404 on "/" which is OK.
@@ -198,7 +200,7 @@ export async function POST(req: NextRequest) {
   try {
     body = (await req.json()) as CreateSessionBody;
   } catch {
-    return NextResponse.json({ ok: false, error: "Invalid JSON." }, { status: 400 });
+    return NextResponse.json({ ok: false, success: false, error: "Invalid JSON." }, { status: 400 });
   }
 
   const baseUrl = normalizeBaseUrl(body.baseUrl);
@@ -206,12 +208,16 @@ export async function POST(req: NextRequest) {
   const rawCookie = (body.cookie ?? "").trim();
   if (rawCookie) {
     if (rawCookie.length < 20) {
-      return NextResponse.json({ ok: false, connector: "cookie", error: "Cookie header is too short." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, success: false, connector: "cookie", error: "Cookie header is too short." },
+        { status: 400 }
+      );
     }
     if (!hasCookie(rawCookie, "auth_token")) {
       return NextResponse.json(
         {
           ok: false,
+          success: false,
           connector: "cookie",
           error:
             "Cookie header is missing auth_token. Make sure you're logged in on Skool, then copy the Cookie request header from DevTools.",
@@ -222,6 +228,7 @@ export async function POST(req: NextRequest) {
     const encryptedCookie = encryptString(rawCookie);
     return NextResponse.json({
       ok: true,
+      success: true,
       baseUrl,
       connector: "cookie",
       encryptedCookie,
@@ -233,7 +240,7 @@ export async function POST(req: NextRequest) {
   const email = (body.email ?? "").trim();
   const password = String(body.password ?? "");
   if (!email.includes("@") || password.length < 3) {
-    return NextResponse.json({ ok: false, error: "Invalid email or password." }, { status: 400 });
+    return NextResponse.json({ ok: false, success: false, error: "Invalid email or password." }, { status: 400 });
   }
 
   // IMPORTANT: In Vercel/serverless, browser automation is often blocked or heavyweight.
@@ -243,6 +250,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         ok: false,
+        success: false,
         connector: "password",
         error:
           "Password login is disabled in this environment. Use Cookie mode, or set ENABLE_SKOOL_PASSWORD_LOGIN=true (and USE_SELENIUM_GRID=true) to enable password login.",
@@ -253,9 +261,10 @@ export async function POST(req: NextRequest) {
 
   // IMPORTANT: We do not store the password. We only use it to establish a session and extract cookies.
   // This is a best-effort headless flow and may break if Skool changes their login UI.
-  // Prefer Selenium Grid whenever SELENIUM_HUB_URL is set (common misconfig: USE_SELENIUM_GRID not set on Vercel).
+  // Prefer Selenium when an URL is configured (remote Vultr or internal hub).
+  const hasRemoteUrl = Boolean(String(process.env.SELENIUM_REMOTE_URL || "").trim());
   const hasHubUrl = Boolean(String(process.env.SELENIUM_HUB_URL || "").trim());
-  const useSelenium = String(process.env.USE_SELENIUM_GRID || "").toLowerCase() === "true" || hasHubUrl;
+  const useSelenium = String(process.env.USE_SELENIUM_GRID || "").toLowerCase() === "true" || hasRemoteUrl || hasHubUrl;
   const connector = useSelenium ? "selenium" : "playwright";
 
   try {
@@ -279,6 +288,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(
           {
             ok: false,
+            success: false,
             connector: "playwright",
             error:
               "Playwright is not available in this deployment. Use Cookie mode, or enable Selenium Grid (USE_SELENIUM_GRID=true + SELENIUM_HUB_URL).",
@@ -347,7 +357,7 @@ export async function POST(req: NextRequest) {
 
     if (!cookieHeader || cookieHeader.length < 20) {
       return NextResponse.json(
-        { ok: false, connector, error: "Login did not produce a valid session cookie." },
+        { ok: false, success: false, connector, error: "Login did not produce a valid session cookie." },
         { status: 401 }
       );
     }
@@ -358,6 +368,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           ok: false,
+          success: false,
           connector,
           error:
             "Login did not yield an auth_token cookie. Skool may have blocked automation (WAF/captcha) or the login flow changed. Try Advanced cookie mode.",
@@ -369,6 +380,7 @@ export async function POST(req: NextRequest) {
     const encryptedCookie = encryptString(cookieHeader);
     return NextResponse.json({
       ok: true,
+      success: true,
       baseUrl,
       connector,
       encryptedCookie,
@@ -377,10 +389,10 @@ export async function POST(req: NextRequest) {
     });
   } catch (e) {
     if (e instanceof HttpError) {
-      return NextResponse.json({ ok: false, connector, error: e.message }, { status: e.status });
+      return NextResponse.json({ ok: false, success: false, connector, error: e.message }, { status: e.status });
     }
     return NextResponse.json(
-      { ok: false, connector, error: e instanceof Error ? e.message : "Session creation failed." },
+      { ok: false, success: false, connector, error: e instanceof Error ? e.message : "Session creation failed." },
       { status: 500 }
     );
   }

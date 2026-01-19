@@ -1,0 +1,27 @@
+name: Deploy Nexus to Vultr
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # permite rodar manualmente no GitHub
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VULTR_HOST }}
+          username: root
+          key: ${{ secrets.VULTR_SSH_PRIVATE_KEY }}
+          script: |
+            cd /app/nexus-horizon-app
+            git pull origin main
+            docker compose down
+            docker compose up -d --build
+            docker system prune -f  # limpa imagens antigas

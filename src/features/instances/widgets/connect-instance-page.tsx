@@ -13,7 +13,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/sha
 import { Input } from "@/shared/ui/input";
 import { Separator } from "@/shared/ui/separator";
 import { Switch } from "@/shared/ui/switch";
-import { Textarea } from "@/shared/ui/textarea";
 
 import logo from "@/app/assets/image/logo.png";
 import {
@@ -88,8 +87,6 @@ export default function ConnectInstancePage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [cookie, setCookie] = useState("");
-  const [showAdvancedCookie, setShowAdvancedCookie] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [blockedByWaf, setBlockedByWaf] = useState<{ message: string; connector?: string } | null>(null);
   const [interactive, setInteractive] = useState<{ sessionId: string; vncUrl?: string | null } | null>(null);
@@ -98,7 +95,7 @@ export default function ConnectInstancePage() {
 
   const verifyRef = useRef<HTMLDivElement | null>(null);
   const instancesRef = useRef<HTMLDivElement | null>(null);
-  const cookieRef = useRef<HTMLTextAreaElement | null>(null);
+  const emailRef = useRef<HTMLInputElement | null>(null);
 
   const handleLogout = () => {
     fetch("/api/auth/signout", { method: "POST" }).finally(() => {
@@ -203,129 +200,85 @@ export default function ConnectInstancePage() {
 
     let encryptedCookie: string | null = null;
     try {
-      const cookieValue = cookie.trim();
-      const useCookie = cookieValue.length > 0;
-      if (useCookie) {
-        const c = cookieValue;
-        if (c.length < 10) {
-          toast.error("Paste your Skool Cookie header first.");
-          cookieRef.current?.focus();
-          setIsVerifying(false);
-          return;
-        }
-        // Cookie UI is hidden for now; keep backend support as a fallback.
-        // Encrypt cookie server-side so the rest of the app can call Skool internal endpoints.
-        const { res: encRes, data: encData } = await fetchJson<{ ok?: boolean; encryptedCookie?: string; error?: string }>(
-          "/api/integrations/skool/session/create",
-          {
+      const e = email.trim();
+      const p = password;
+      if (!e.includes("@") || p.length < 3) {
+        toast.error("Enter a valid Skool email and password.");
+        setIsVerifying(false);
+        return;
+      }
+
+      let lastConnector: string | undefined;
+      let attempt = 0;
+      let coldStartToastShown = false;
+      while (true) {
+        attempt += 1;
+        try {
+          const { res: connectorRes, data: connectorData } = await fetchJson<{
+            ok?: boolean;
+            encryptedCookie?: string;
+            connector?: string;
+            error?: string;
+          }>("/api/integrations/skool/session/create", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ baseUrl: b, cookie: c }),
+            body: JSON.stringify({ baseUrl: b, email: e, password: p }),
             timeoutMs: timeLeft(),
+          });
+
+          lastConnector = connectorData.connector;
+
+          if (connectorRes.ok && connectorData.ok !== false && connectorData.encryptedCookie) {
+            encryptedCookie = connectorData.encryptedCookie;
+            break;
           }
-        );
-        if (!encRes.ok || encData.ok === false || !encData.encryptedCookie) {
-          toast.error(encData.error || "Could not encrypt cookie.");
-          setIsVerifying(false);
-          return;
-        }
-        encryptedCookie = encData.encryptedCookie;
 
-        const { res, data } = await fetchJson<{ ok?: boolean; looksLoggedIn?: boolean | null; error?: string }>(
-          "/api/integrations/skool/verify",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ baseUrl: b, encryptedCookie }),
-            timeoutMs: timeLeft(),
-          }
-        );
-        if (!res.ok || data.ok === false) {
-          toast.error(data.error || "Could not verify session.");
-          setIsVerifying(false);
-          return;
-        }
-        void data;
-      } else {
-        const e = email.trim();
-        const p = password;
-        if (!e.includes("@") || p.length < 3) {
-          toast.error("Enter a valid Skool email and password.");
-          setIsVerifying(false);
-          return;
-        }
-        let lastConnector: string | undefined;
-        let attempt = 0;
-        let coldStartToastShown = false;
-        while (true) {
-          attempt += 1;
-          try {
-            const { res: connectorRes, data: connectorData } = await fetchJson<{
-              ok?: boolean;
-              encryptedCookie?: string;
-              connector?: string;
-              error?: string;
-            }>("/api/integrations/skool/session/create", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ baseUrl: b, email: e, password: p }),
-              timeoutMs: timeLeft(),
-            });
+          const msg = connectorData.error || `Could not create Skool connector session (HTTP ${connectorRes.status}).`;
+          const retryable =
+            connectorRes.status === 503 ||
+            connectorRes.status === 502 ||
+            connectorRes.status === 504 ||
+            /selenium.*(not\s*ready|unreachable|wake|hibernat|cold\s*start)/i.test(msg);
 
-            lastConnector = connectorData.connector;
-
-            if (connectorRes.ok && connectorData.ok !== false && connectorData.encryptedCookie) {
-              encryptedCookie = connectorData.encryptedCookie;
-              break;
-            }
-
-            const msg = connectorData.error || `Could not create Skool connector session (HTTP ${connectorRes.status}).`;
-            const retryable =
-              connectorRes.status === 503 ||
-              connectorRes.status === 502 ||
-              connectorRes.status === 504 ||
-              /selenium.*(not\s*ready|unreachable|wake|hibernat|cold\s*start)/i.test(msg);
-
-            if (!retryable || timeLeft() < 6000) {
-              if (/auth_token|waf|captcha/i.test(msg)) {
-                setBlockedByWaf({ message: msg, connector: connectorData.connector });
-                toast.error("Skool blocked automated login. Use the quick verification step below.");
-              } else {
+          if (!retryable || timeLeft() < 6000) {
+            if (/auth_token|waf|captcha/i.test(msg)) {
+              setBlockedByWaf({ message: msg, connector: connectorData.connector });
+              toast.error("Skool blocked automated login. Use the quick verification step below.");
+            } else {
               toast.error(`${msg}${lastConnector ? ` (connector: ${lastConnector})` : ""}`);
-              }
-              setIsVerifying(false);
-              return;
             }
-
-            if (!coldStartToastShown) {
-              coldStartToastShown = true;
-              toast.info("Connector is waking up (Render cold start). Retrying…");
-            }
-
-            const delay = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS + attempt * 450);
-            await sleep(Math.min(delay, timeLeft() - 2000));
-          } catch (err) {
-            const retryable = err instanceof TimeoutError;
-            if (!retryable || timeLeft() < 6000) {
-              if (err instanceof TimeoutError) {
-                toast.error(
-                  `Connection timed out after ~40s.${lastConnector ? ` (connector: ${lastConnector})` : ""} If the connector is sleeping, wait ~60s and try again.`
-                );
-              } else {
-                toast.error("Could not verify session (network error).");
-              }
-              setIsVerifying(false);
-              return;
-            }
-
-            if (!coldStartToastShown) {
-              coldStartToastShown = true;
-              toast.info("Connector is waking up (Render cold start). Retrying…");
-            }
-
-            const delay = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS + attempt * 450);
-            await sleep(Math.min(delay, timeLeft() - 2000));
+            setIsVerifying(false);
+            return;
           }
+
+          if (!coldStartToastShown) {
+            coldStartToastShown = true;
+            toast.info("Connector is waking up (cold start). Retrying…");
+          }
+
+          const delay = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS + attempt * 450);
+          await sleep(Math.min(delay, timeLeft() - 2000));
+        } catch (err) {
+          const retryable = err instanceof TimeoutError;
+          if (!retryable || timeLeft() < 6000) {
+            if (err instanceof TimeoutError) {
+              toast.error(
+                `Connection timed out after ~40s.${lastConnector ? ` (connector: ${lastConnector})` : ""} Please try again.`
+              );
+            } else {
+              toast.error("Could not verify session (network error).");
+            }
+            setIsVerifying(false);
+            return;
+          }
+
+          if (!coldStartToastShown) {
+            coldStartToastShown = true;
+            toast.info("Connector is waking up (cold start). Retrying…");
+          }
+
+          const delay = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS + attempt * 450);
+          await sleep(Math.min(delay, timeLeft() - 2000));
         }
       }
 
@@ -517,7 +470,7 @@ export default function ConnectInstancePage() {
               <CardHeader>
                 <CardTitle className="text-base font-extrabold">Connect to Skool</CardTitle>
                 <CardDescription>
-                  Create an instance using email + password or a Cookie header. We never store your password—only an encrypted session cookie.
+                  Create an instance using email + password. We never store your password—only an encrypted session cookie.
               </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -525,7 +478,12 @@ export default function ConnectInstancePage() {
                   <div>
                     <div className="text-sm font-semibold text-zinc-900">Skool Email</div>
                     <div className="mt-2">
-                        <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@myaccount.com" />
+                        <Input
+                          ref={emailRef}
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          placeholder="email@myaccount.com"
+                        />
                       </div>
                     </div>
                     <div>
@@ -535,27 +493,6 @@ export default function ConnectInstancePage() {
                       </div>
                     </div>
                   </div>
-
-                <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200 bg-white px-4 py-3">
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold text-zinc-900">Having trouble?</div>
-                    <div className="mt-0.5 text-xs text-zinc-500">
-                      If Skool blocks automated login (WAF/captcha), use a Cookie header instead.
-                    </div>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="cursor-pointer"
-                    onClick={() => {
-                      setShowAdvancedCookie((v) => !v);
-                      window.setTimeout(() => cookieRef.current?.focus(), 100);
-                    }}
-                  >
-                    {showAdvancedCookie ? "Hide advanced" : "Use cookie header"}
-                  </Button>
-                </div>
 
                 {blockedByWaf ? (
                   <div className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-3">
@@ -611,25 +548,6 @@ export default function ConnectInstancePage() {
                   </div>
                 ) : null}
 
-                {showAdvancedCookie ? (
-                  <div className="space-y-2 rounded-2xl border border-zinc-200 bg-zinc-50/60 px-4 py-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-xs font-semibold text-zinc-900">Cookie header (Advanced)</div>
-                      <div className="text-[11px] font-semibold text-zinc-500">We store only an encrypted session cookie.</div>
-                    </div>
-                    <Textarea
-                      ref={cookieRef}
-                      value={cookie}
-                      onChange={(e) => setCookie(e.target.value)}
-                      placeholder="Paste the full Cookie request header from your browser DevTools…"
-                      className="min-h-[92px] font-mono text-xs"
-                    />
-                    <div className="text-[11px] text-zinc-500">
-                      Tip: Open `www.skool.com` while logged in → DevTools → Network → any request → Headers → Request Headers → Copy <b>Cookie</b>.
-                    </div>
-                  </div>
-                ) : null}
-
                 <Button className="cursor-pointer w-full" onClick={() => void onVerify()} disabled={isVerifying}>
                   {isVerifying ? (
                     <>
@@ -664,7 +582,7 @@ export default function ConnectInstancePage() {
                       window.setTimeout(() => setFlashVerify(false), 900);
 
                       verifyRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-                      window.setTimeout(() => cookieRef.current?.focus(), 200);
+                      window.setTimeout(() => emailRef.current?.focus(), 200);
                     }}
                   >
                     Create instance
